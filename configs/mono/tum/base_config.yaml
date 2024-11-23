@@ -43,6 +43,7 @@ Training:
   single_thread: False
   spherical_harmonics: False
 
+  sketch_aspect: 3
   lambda: 0.01
   max_lambda: 100000000
   min_lambda: 0.00001

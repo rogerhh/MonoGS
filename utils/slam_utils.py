@@ -104,7 +104,7 @@ def get_loss_tracking_rgb_per_pixel(config, image, depth, opacity, viewpoint):
     rgb_boundary_threshold = config["Training"]["rgb_boundary_threshold"]
     rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*mask_shape)
     rgb_pixel_mask = rgb_pixel_mask * viewpoint.grad_mask
-    l1 = opacity * torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
+    l1 = opacity * (image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
     return l1
 
 
@@ -119,7 +119,8 @@ def get_loss_tracking_rgbd_per_pixel(config, image, depth, opacity, viewpoint, i
 
     l1_rgb = get_loss_tracking_rgb_per_pixel(config, image, depth, opacity, viewpoint)
     depth_mask = depth_pixel_mask * opacity_mask
-    l1_depth = torch.abs(depth * depth_mask - gt_depth * depth_mask)
+    l1_depth = depth * depth_mask - gt_depth * depth_mask
+    raise NotImplementedError("This is currently incorrect because depth loss needs to be stacked on top of rgb loss")
     return alpha * l1_rgb + (1 - alpha) * l1_depth
 
 
@@ -182,7 +183,7 @@ def get_loss_mapping_rgb_per_pixel(config, image, depth, viewpoint):
     rgb_boundary_threshold = config["Training"]["rgb_boundary_threshold"]
 
     rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*mask_shape)
-    l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
+    l1_rgb = image * rgb_pixel_mask - gt_image * rgb_pixel_mask
 
     return l1_rgb
 
@@ -198,8 +199,9 @@ def get_loss_mapping_rgbd_per_pixel(config, image, depth, viewpoint, initializat
     rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*depth.shape)
     depth_pixel_mask = (gt_depth > 0.01).view(*depth.shape)
 
-    l1_rgb = torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
-    l1_depth = torch.abs(depth * depth_pixel_mask - gt_depth * depth_pixel_mask)
+    l1_rgb = image * rgb_pixel_mask - gt_image * rgb_pixel_mask
+    l1_depth = depth * depth_pixel_mask - gt_depth * depth_pixel_mask
+    raise NotImplementedError("This is currently incorrect because depth loss needs to be stacked on top of rgb loss")
 
     return alpha * l1_rgb + (1 - alpha) * l1_depth
 

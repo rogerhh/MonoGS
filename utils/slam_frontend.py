@@ -162,6 +162,7 @@ class FrontEnd(mp.Process):
         )
 
         # LM Parameters
+        sketch_aspect = self.config["Training"]["sketch_aspect"]
         lambda_ = self.config["Training"]["lambda"]
         max_lambda = self.config["Training"]["max_lambda"]
         min_lambda = self.config["Training"]["min_lambda"]
@@ -196,12 +197,12 @@ class FrontEnd(mp.Process):
 
             if second_order:
                 # loss_tracking_vec = torch.sqrt(loss_tracking_img.flatten())
-                loss_tracking_vec = torch.sqrt(loss_tracking_img.flatten() + 1e-8)
+                # loss_tracking_vec = torch.sqrt(loss_tracking_img.flatten() + 1e-8)
+                loss_tracking_vec = loss_tracking_img.flatten()
                 # check if loss_tracking_vec has nan values
                 if torch.isnan(loss_tracking_vec).any():
                     raise ValueError("Loss tracking vector has nan values")
 
-                sketch_aspect = 3
                 n = (viewpoint.cam_trans_delta.shape[0] + viewpoint.cam_rot_delta.shape[0] + viewpoint.exposure_a.shape[0] + viewpoint.exposure_b.shape[0])
                 m = loss_tracking_vec.shape[0]
                 d = sketch_aspect * n
