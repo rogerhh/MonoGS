@@ -1,9 +1,9 @@
 Results:
-  save_results: True
+  save_results: False
   save_dir: "results"
   save_trj: True
   save_trj_kf_intv: 10
-  use_gui: True
+  use_gui: False
   eval_rendering: False
   use_wandb: False
 
@@ -43,9 +43,22 @@ Training:
   single_thread: False
   spherical_harmonics: False
 
+  lambda: 0.01
+  max_lambda: 100000000
+  min_lambda: 0.00001
+  increase_factor: 2
+  decrease_factor: 3
+  max_iter_without_improvement: 10
+  second_order: True
+  switch_to_first_order: False
+
   lr:
+    # cam_rot_delta: 0.0003
+    # cam_trans_delta: 0.0001
     cam_rot_delta: 0.003
     cam_trans_delta: 0.001
+    exposure_a: 0.02
+    exposure_b: 0.02
 
 opt_params:
   iterations: 30000

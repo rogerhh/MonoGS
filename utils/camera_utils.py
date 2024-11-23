@@ -53,8 +53,9 @@ class Camera(nn.Module):
             torch.zeros(3, requires_grad=True, device=device)
         )
 
+        self.exposure_eps = 1e-8
         self.exposure_a = nn.Parameter(
-            torch.tensor([0.0], requires_grad=True, device=device)
+            torch.tensor([1.0], requires_grad=True, device=device)
         )
         self.exposure_b = nn.Parameter(
             torch.tensor([0.0], requires_grad=True, device=device)

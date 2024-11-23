@@ -3,6 +3,8 @@ import time
 import numpy as np
 import torch
 import torch.multiprocessing as mp
+from copy import deepcopy
+import math
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
@@ -12,7 +14,7 @@ from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
-from utils.slam_utils import get_loss_tracking, get_median_depth
+from utils.slam_utils import get_loss_tracking, get_loss_tracking_per_pixel, get_median_depth
 
 
 class FrontEnd(mp.Process):
@@ -147,17 +149,32 @@ class FrontEnd(mp.Process):
         opt_params.append(
             {
                 "params": [viewpoint.exposure_a],
-                "lr": 0.01,
+                "lr": self.config["Training"]["lr"]["exposure_a"],
                 "name": "exposure_a_{}".format(viewpoint.uid),
             }
         )
         opt_params.append(
             {
                 "params": [viewpoint.exposure_b],
-                "lr": 0.01,
+                "lr": self.config["Training"]["lr"]["exposure_b"],
                 "name": "exposure_b_{}".format(viewpoint.uid),
             }
         )
+
+        # LM Parameters
+        lambda_ = self.config["Training"]["lambda"]
+        max_lambda = self.config["Training"]["max_lambda"]
+        min_lambda = self.config["Training"]["min_lambda"]
+        increase_factor = self.config["Training"]["increase_factor"]
+        decrease_factor = self.config["Training"]["decrease_factor"]
+        max_iter_without_improvement = self.config["Training"]["max_iter_without_improvement"]
+        second_order = self.config["Training"]["second_order"]
+        switch_to_first_order = self.config["Training"]["switch_to_first_order"]
+        inner_iter = 0
+
+        print(f"Pose: {viewpoint.R.cpu().numpy()}, {viewpoint.T.cpu().numpy()}, {viewpoint.exposure_a.item()}, {viewpoint.exposure_b.item()}")
+
+        print(f"second order: {second_order}, switch_to_first_order: {switch_to_first_order}")
 
         pose_optimizer = torch.optim.Adam(opt_params)
         for tracking_itr in range(self.tracking_itr_num):
@@ -170,14 +187,132 @@ class FrontEnd(mp.Process):
                 render_pkg["opacity"],
             )
             pose_optimizer.zero_grad()
-            loss_tracking = get_loss_tracking(
+            loss_tracking_img = get_loss_tracking_per_pixel(
                 self.config, image, depth, opacity, viewpoint
             )
-            loss_tracking.backward()
 
-            with torch.no_grad():
-                pose_optimizer.step()
-                converged = update_pose(viewpoint)
+            loss_tracking = torch.norm(loss_tracking_img.flatten(), p=2)
+            print(f"tracking_itr = {tracking_itr}, loss = {loss_tracking.item()}, inner_iter = {inner_iter}")
+
+            if second_order:
+                # loss_tracking_vec = torch.sqrt(loss_tracking_img.flatten())
+                loss_tracking_vec = torch.sqrt(loss_tracking_img.flatten() + 1e-8)
+                # check if loss_tracking_vec has nan values
+                if torch.isnan(loss_tracking_vec).any():
+                    raise ValueError("Loss tracking vector has nan values")
+
+                sketch_aspect = 3
+                n = (viewpoint.cam_trans_delta.shape[0] + viewpoint.cam_rot_delta.shape[0] + viewpoint.exposure_a.shape[0] + viewpoint.exposure_b.shape[0])
+                m = loss_tracking_vec.shape[0]
+                d = sketch_aspect * n
+
+                # Sample a (m, ) tensor where each entry is an integer drawn from [0, d)
+                # This is the sketching matrix
+                sketch = torch.randint(0, d, (m,))
+
+                J = []
+                f = []
+
+                for i in range(d):
+                    sketch_len = len(sketch[sketch == i])
+                    # Generate a vector (sketch_len, ) of either 1 or -1
+                    weights = torch.randint(0, 2, (sketch_len,)) * 2 - 1
+                    weights = weights.float().to(loss_tracking.device)
+                    loss_i = torch.sum(loss_tracking_vec[sketch == i] * weights) / (m / d)
+                    loss_i.backward(retain_graph=True)
+
+                    J.append(torch.cat([viewpoint.cam_trans_delta.grad, viewpoint.cam_rot_delta.grad, viewpoint.exposure_a.grad, viewpoint.exposure_b.grad]))
+                    f.append(loss_i)
+
+                J = torch.stack(J)
+                f = torch.stack(f)
+
+                best_x = torch.zeros(n, device=J.device)
+
+                with torch.no_grad():
+                    # Implement Levenberg-Marquardt
+                    old_loss = loss_tracking
+                    lm_converged = False
+                    iter_without_improvement = 0
+                    inner_iter = 0
+                    while True:
+                        inner_iter += 1
+                        iter_without_improvement += 1
+
+                        J_damp = J.clone()
+
+                        damp_rows = torch.randperm(d)[:n]
+                        damp_cols = torch.arange(n)
+                        damp_vals = (torch.randint(0, 2, (n,)) * 2 - 1) * math.sqrt(lambda_)
+                        damp_vals = damp_vals.to(J.device)
+
+                        J_damp[damp_rows, damp_cols] += damp_vals
+
+                        H = J_damp.T @ J_damp
+                        g = J_damp.T @ f
+
+                        x = torch.linalg.solve(H, -g)
+
+                        new_viewpoint = deepcopy(viewpoint)
+
+                        new_viewpoint.cam_trans_delta.data += x[:3]
+                        new_viewpoint.cam_rot_delta.data += x[3:6]
+                        new_viewpoint.exposure_a.data += x[6]
+                        new_viewpoint.exposure_b.data += x[7]
+                        update_pose(new_viewpoint)
+
+                        render_pkg = render(
+                            new_viewpoint, self.gaussians, self.pipeline_params, self.background
+                        )
+                        image, depth, opacity = (
+                            render_pkg["render"],
+                            render_pkg["depth"],
+                            render_pkg["opacity"],
+                        )
+
+                        new_loss_tracking_img = get_loss_tracking_per_pixel(
+                            self.config, image, depth, opacity, new_viewpoint
+                        )
+
+                        new_loss = torch.norm(new_loss_tracking_img.flatten(), p=2)
+
+                        if new_loss < old_loss:
+                            lambda_ = max(lambda_ / decrease_factor, min_lambda)
+                            iter_without_improvement = 0
+                            best_x = x
+                            break
+                        else:
+                            lambda_ = min(lambda_ * increase_factor, max_lambda)
+                            if iter_without_improvement >= max_iter_without_improvement:
+                                lm_converged = True
+                                break
+
+                with torch.no_grad():
+                    viewpoint.cam_trans_delta.data += best_x[:3]
+                    viewpoint.cam_rot_delta.data += best_x[3:6]
+                    viewpoint.exposure_a.data += best_x[6]
+                    viewpoint.exposure_b.data += best_x[7]
+
+                    second_order_converged = update_pose(viewpoint) or lm_converged
+                    converged = second_order_converged and not switch_to_first_order
+                    if second_order_converged:
+                        second_order = False
+                        print(f"Pose: {viewpoint.R.cpu().numpy()}, {viewpoint.T.cpu().numpy()}, {viewpoint.exposure_a.item()}, {viewpoint.exposure_b.item()}")
+                        print(f"GT: {viewpoint.R_gt.cpu().numpy()}, {viewpoint.T_gt.cpu().numpy()}")
+                        print("Switching to first order optimization")
+
+            else:
+                loss_tracking = loss_tracking_img.sum()
+
+                loss_tracking.backward()
+
+                with torch.no_grad():
+                    pose_optimizer.step()
+                    converged = update_pose(viewpoint)
+
+                if converged:
+                    print(f"Pose: {viewpoint.R.cpu().numpy()}, {viewpoint.T.cpu().numpy()}, {viewpoint.exposure_a.item()}, {viewpoint.exposure_b.item()}")
+                    print(f"GT: {viewpoint.R_gt.cpu().numpy()}, {viewpoint.T_gt.cpu().numpy()}")
 
             if tracking_itr % 10 == 0:
                 self.q_main2vis.put(
@@ -191,6 +326,7 @@ class FrontEnd(mp.Process):
                 )
             if converged:
                 break
+        print("Tracking converged in {} iterations".format(tracking_itr))
 
         self.median_depth = get_median_depth(depth, opacity)
         return render_pkg

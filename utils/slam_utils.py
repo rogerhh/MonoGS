@@ -54,7 +54,8 @@ def depth_reg(depth, gt_image, huber_eps=0.1, mask=None):
 
 
 def get_loss_tracking(config, image, depth, opacity, viewpoint, initialization=False):
-    image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
+    # image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
+    image_ab = (torch.abs(viewpoint.exposure_a) + viewpoint.exposure_eps) * image + viewpoint.exposure_b
     if config["Training"]["monocular"]:
         return get_loss_tracking_rgb(config, image_ab, depth, opacity, viewpoint)
     return get_loss_tracking_rgbd(config, image_ab, depth, opacity, viewpoint)
@@ -88,11 +89,46 @@ def get_loss_tracking_rgbd(
     return alpha * l1_rgb + (1 - alpha) * l1_depth.mean()
 
 
+def get_loss_tracking_per_pixel(config, image, depth, opacity, viewpoint, initialization=False):
+    # image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
+    image_ab = (torch.abs(viewpoint.exposure_a) + viewpoint.exposure_eps) * image + viewpoint.exposure_b
+    if config["Training"]["monocular"]:
+        return get_loss_tracking_rgb_per_pixel(config, image_ab, depth, opacity, viewpoint)
+    return get_loss_tracking_rgbd_per_pixel(config, image_ab, depth, opacity, viewpoint)
+
+
+def get_loss_tracking_rgb_per_pixel(config, image, depth, opacity, viewpoint):
+    gt_image = viewpoint.original_image.cuda()
+    _, h, w = gt_image.shape
+    mask_shape = (1, h, w)
+    rgb_boundary_threshold = config["Training"]["rgb_boundary_threshold"]
+    rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*mask_shape)
+    rgb_pixel_mask = rgb_pixel_mask * viewpoint.grad_mask
+    l1 = opacity * torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)
+    return l1
+
+
+def get_loss_tracking_rgbd_per_pixel(config, image, depth, opacity, viewpoint, initialization=False):
+    alpha = config["Training"]["alpha"] if "alpha" in config["Training"] else 0.95
+
+    gt_depth = torch.from_numpy(viewpoint.depth).to(
+        dtype=torch.float32, device=image.device
+    )[None]
+    depth_pixel_mask = (gt_depth > 0.01).view(*depth.shape)
+    opacity_mask = (opacity > 0.95).view(*depth.shape)
+
+    l1_rgb = get_loss_tracking_rgb_per_pixel(config, image, depth, opacity, viewpoint)
+    depth_mask = depth_pixel_mask * opacity_mask
+    l1_depth = torch.abs(depth * depth_mask - gt_depth * depth_mask)
+    return alpha * l1_rgb + (1 - alpha) * l1_depth
+
+
 def get_loss_mapping(config, image, depth, viewpoint, opacity, initialization=False):
     if initialization:
         image_ab = image
     else:
-        image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
+        # image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
+        image_ab = (torch.abs(viewpoint.exposure_a) + viewpoint.exposure_eps) * image + viewpoint.exposure_b
     if config["Training"]["monocular"]:
         return get_loss_mapping_rgb(config, image_ab, depth, viewpoint)
     return get_loss_mapping_rgbd(config, image_ab, depth, viewpoint)
@@ -132,7 +168,8 @@ def get_loss_mapping_per_pixel(config, image, depth, viewpoint, opacity, initial
     if initialization:
         image_ab = image
     else:
-        image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
+        # image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
+        image_ab = (torch.abs(viewpoint.exposure_a) + viewpoint.exposure_eps) * image + viewpoint.exposure_b
     if config["Training"]["monocular"]:
         return get_loss_mapping_rgb_per_pixel(config, image_ab, depth, viewpoint)
     return get_loss_mapping_rgbd_per_pixel(config, image_ab, depth, viewpoint)

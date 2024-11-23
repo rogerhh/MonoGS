@@ -457,14 +457,14 @@ class BackEnd(mp.Process):
                         opt_params.append(
                             {
                                 "params": [viewpoint.exposure_a],
-                                "lr": 0.01,
+                                "lr": self.config["Training"]["lr"]["exposure_a"],
                                 "name": "exposure_a_{}".format(viewpoint.uid),
                             }
                         )
                         opt_params.append(
                             {
                                 "params": [viewpoint.exposure_b],
-                                "lr": 0.01,
+                                "lr": self.config["Training"]["lr"]["exposure_b"],
                                 "name": "exposure_b_{}".format(viewpoint.uid),
                             }
                         )
