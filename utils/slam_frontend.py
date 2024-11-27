@@ -242,7 +242,8 @@ class FrontEnd(mp.Process):
 
                         J_damp = J.clone()
 
-                        damp_rows = torch.randperm(d)[:n]
+                        # damp_rows = torch.randperm(d)[:n]
+                        damp_rows = torch.randint(0, d, (n,))
                         damp_cols = torch.arange(n)
                         damp_vals = (torch.randint(0, 2, (n,)) * 2 - 1) * math.sqrt(lambda_)
                         damp_vals = damp_vals.to(J.device)
@@ -303,7 +304,8 @@ class FrontEnd(mp.Process):
                         print("Switching to first order optimization")
 
             else:
-                loss_tracking = loss_tracking_img.sum()
+                # Get l1 norm of loss_tracking
+                loss_tracking = torch.norm(loss_tracking_img.flatten(), p=1)
 
                 loss_tracking.backward()
 
