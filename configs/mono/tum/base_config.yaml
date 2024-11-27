@@ -43,13 +43,13 @@ Training:
   single_thread: False
   spherical_harmonics: False
 
-  sketch_aspect: 3
+  sketch_aspect: 2
   lambda: 0.01
   max_lambda: 100000000
   min_lambda: 0.00001
   increase_factor: 2
   decrease_factor: 3
-  max_iter_without_improvement: 10
+  max_iter_without_improvement: 20
   second_order: True
   switch_to_first_order: False
 
