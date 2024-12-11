@@ -40,16 +40,17 @@ Training:
   kf_overlap: 0.9
   kf_cutoff: 0.3
   prune_mode: 'slam'
-  single_thread: False
+  single_thread: True
   spherical_harmonics: False
 
   sketch_aspect: 2
+  num_backward_gaussians: 1000
   lambda: 0.01
   max_lambda: 100000000
   min_lambda: 0.00001
-  increase_factor: 2
-  decrease_factor: 3
-  max_iter_without_improvement: 20
+  increase_factor: 4
+  decrease_factor: 6
+  max_iter_without_improvement: 10
   second_order: True
   switch_to_first_order: False
 

@@ -5,6 +5,7 @@ import torch
 import torch.multiprocessing as mp
 from copy import deepcopy
 import math
+import os
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
@@ -171,6 +172,7 @@ class FrontEnd(mp.Process):
         max_iter_without_improvement = self.config["Training"]["max_iter_without_improvement"]
         second_order = self.config["Training"]["second_order"]
         switch_to_first_order = self.config["Training"]["switch_to_first_order"]
+        num_backward_gaussians = self.config["Training"]["num_backward_gaussians"]
         inner_iter = 0
 
         print(f"Pose: {viewpoint.R.cpu().numpy()}, {viewpoint.T.cpu().numpy()}, {viewpoint.exposure_a.item()}, {viewpoint.exposure_b.item()}")
@@ -180,7 +182,7 @@ class FrontEnd(mp.Process):
         pose_optimizer = torch.optim.Adam(opt_params)
         for tracking_itr in range(self.tracking_itr_num):
             render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background
+                viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=num_backward_gaussians
             )
             image, depth, opacity = (
                 render_pkg["render"],
@@ -225,12 +227,12 @@ class FrontEnd(mp.Process):
                     J.append(torch.cat([viewpoint.cam_trans_delta.grad, viewpoint.cam_rot_delta.grad, viewpoint.exposure_a.grad, viewpoint.exposure_b.grad]))
                     f.append(loss_i)
 
-                J = torch.stack(J)
-                f = torch.stack(f)
-
-                best_x = torch.zeros(n, device=J.device)
-
                 with torch.no_grad():
+                    J = torch.stack(J)
+                    f = torch.stack(f)
+
+                    best_x = torch.zeros(n, device=J.device)
+
                     # Implement Levenberg-Marquardt
                     old_loss = loss_tracking
                     lm_converged = False
@@ -242,8 +244,8 @@ class FrontEnd(mp.Process):
 
                         J_damp = J.clone()
 
-                        # damp_rows = torch.randperm(d)[:n]
-                        damp_rows = torch.randint(0, d, (n,))
+                        damp_rows = torch.randperm(d)[:n]
+                        # damp_rows = torch.randint(0, d, (n,))
                         damp_cols = torch.arange(n)
                         damp_vals = (torch.randint(0, 2, (n,)) * 2 - 1) * math.sqrt(lambda_)
                         damp_vals = damp_vals.to(J.device)
@@ -297,8 +299,23 @@ class FrontEnd(mp.Process):
 
                     second_order_converged = update_pose(viewpoint) or lm_converged
                     converged = second_order_converged and not switch_to_first_order
+
                     if second_order_converged:
                         second_order = False
+
+                        # DEBUG: Set to GT
+                        viewpoint.R = viewpoint.R_gt.clone()
+                        viewpoint.T = viewpoint.T_gt.clone()
+
+                        render_pkg = render(
+                            viewpoint, self.gaussians, self.pipeline_params, self.background
+                        )
+                        image, depth, opacity = (
+                            render_pkg["render"],
+                            render_pkg["depth"],
+                            render_pkg["opacity"],
+                        )
+
                         print(f"Pose: {viewpoint.R.cpu().numpy()}, {viewpoint.T.cpu().numpy()}, {viewpoint.exposure_a.item()}, {viewpoint.exposure_b.item()}")
                         print(f"GT: {viewpoint.R_gt.cpu().numpy()}, {viewpoint.T_gt.cpu().numpy()}")
                         print("Switching to first order optimization")
@@ -619,6 +636,7 @@ class FrontEnd(mp.Process):
                     time.sleep(max(0.01, 1.0 / 3.0 - duration / 1000))
             else:
                 data = self.frontend_queue.get()
+                print(f"Tag {data[0]}, Frontend queue size: {self.frontend_queue.qsize()}")
                 if data[0] == "sync_backend":
                     self.sync_backend(data)
 

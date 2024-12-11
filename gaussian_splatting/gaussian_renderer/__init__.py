@@ -29,6 +29,7 @@ def render(
     scaling_modifier=1.0,
     override_color=None,
     mask=None,
+    num_backward_gaussians=None,
 ):
     """
     Render the scene.
@@ -125,6 +126,7 @@ def render(
             cov3D_precomp=cov3D_precomp[mask] if cov3D_precomp is not None else None,
             theta=viewpoint_camera.cam_rot_delta,
             rho=viewpoint_camera.cam_trans_delta,
+            num_backward_gaussians=num_backward_gaussians,
         )
     else:
         rendered_image, radii, depth, opacity, n_touched = rasterizer(
@@ -138,6 +140,7 @@ def render(
             cov3D_precomp=cov3D_precomp,
             theta=viewpoint_camera.cam_rot_delta,
             rho=viewpoint_camera.cam_trans_delta,
+            num_backward_gaussians=num_backward_gaussians,
         )
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
