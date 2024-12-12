@@ -172,6 +172,7 @@ class FrontEnd(mp.Process):
         max_iter_without_improvement = self.config["Training"]["max_iter_without_improvement"]
         second_order = self.config["Training"]["second_order"]
         switch_to_first_order = self.config["Training"]["switch_to_first_order"]
+        override_with_gt = self.config["Training"]["override_with_gt"]
         num_backward_gaussians = self.config["Training"]["num_backward_gaussians"]
         inner_iter = 0
 
@@ -209,9 +210,13 @@ class FrontEnd(mp.Process):
                 m = loss_tracking_vec.shape[0]
                 d = sketch_aspect * n
 
-                # Sample a (m, ) tensor where each entry is an integer drawn from [0, d)
-                # This is the sketching matrix
-                sketch = torch.randint(0, d, (m,))
+                # # Sample a (m, ) tensor where each entry is an integer drawn from [0, d)
+                # # This is the sketching matrix
+                # sketch = torch.randint(0, d, (m,))
+
+                # Instead of sampling indices, shuffle the indices then split them into d parts
+                sketch_indices = torch.randperm(m)
+                sketch_indices = torch.split(sketch_indices, m // d)
 
                 J = []
                 f = []
@@ -225,11 +230,12 @@ class FrontEnd(mp.Process):
                     viewpoint.exposure_a.grad = None
                     viewpoint.exposure_b.grad = None
 
-                    sketch_len = len(sketch[sketch == i])
+                    indices = sketch_indices[i]
+                    sketch_len = len(indices)
                     # Generate a vector (sketch_len, ) of either 1 or -1
                     weights = torch.randint(0, 2, (sketch_len,)) * 2 - 1
                     weights = weights.float().to(loss_tracking.device)
-                    loss_i = torch.sum(loss_tracking_vec[sketch == i] * weights) / (m / d)
+                    loss_i = torch.sum(loss_tracking_vec[indices] * weights) / (m / d)
                     loss_i.backward(retain_graph=True)
 
                     J.append(torch.cat([viewpoint.cam_trans_delta.grad, viewpoint.cam_rot_delta.grad, viewpoint.exposure_a.grad, viewpoint.exposure_b.grad]))
@@ -311,9 +317,10 @@ class FrontEnd(mp.Process):
                     if second_order_converged:
                         second_order = False
 
-                        # DEBUG: Set to GT
-                        viewpoint.R = viewpoint.R_gt.clone()
-                        viewpoint.T = viewpoint.T_gt.clone()
+                        if override_with_gt:
+                            # DEBUG: Set to GT
+                            viewpoint.R = viewpoint.R_gt.clone()
+                            viewpoint.T = viewpoint.T_gt.clone()
 
                         render_pkg = render(
                             viewpoint, self.gaussians, self.pipeline_params, self.background
