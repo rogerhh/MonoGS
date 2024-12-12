@@ -217,6 +217,14 @@ class FrontEnd(mp.Process):
                 f = []
 
                 for i in range(d):
+                    # Reset grad first
+                    pose_optimizer.zero_grad()
+
+                    viewpoint.cam_trans_delta.grad = None
+                    viewpoint.cam_rot_delta.grad = None
+                    viewpoint.exposure_a.grad = None
+                    viewpoint.exposure_b.grad = None
+
                     sketch_len = len(sketch[sketch == i])
                     # Generate a vector (sketch_len, ) of either 1 or -1
                     weights = torch.randint(0, 2, (sketch_len,)) * 2 - 1
