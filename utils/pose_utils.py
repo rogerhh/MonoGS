@@ -91,3 +91,10 @@ def update_pose(camera, converged_threshold=1e-4):
     camera.cam_rot_delta.data.fill_(0)
     camera.cam_trans_delta.data.fill_(0)
     return converged
+
+def angle_diff(R1, R2):
+    R = R1.float() @ R2.float().transpose(0, 1)
+    tr = R.trace()
+    tr = torch.clamp(tr, -1.0, 3.0)
+    angle = torch.acos((tr - 1.0) / 2.0)
+    return angle

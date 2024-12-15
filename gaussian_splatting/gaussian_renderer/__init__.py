@@ -29,7 +29,7 @@ def render(
     scaling_modifier=1.0,
     override_color=None,
     mask=None,
-    num_backward_gaussians=None,
+    num_backward_gaussians=-1,
 ):
     """
     Render the scene.

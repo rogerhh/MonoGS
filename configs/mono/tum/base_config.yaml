@@ -43,16 +43,55 @@ Training:
   single_thread: True
   spherical_harmonics: False
 
+  RGN:
+    first_order:
+      max_iter: 100
+      fast_iter: 0
+      num_backward_gaussians: -1
+    second_order:
+      max_iter: 0
+      num_backward_gaussians: 300
+      sketch_aspect: 2
+      initial_lambda: 0.01
+      max_lambda: 100000000
+      min_lambda: 0.00001
+      increase_factor: 2
+      decrease_factor: 3
+      trust_region_cutoff: 0.0001
+      converged_threshold: 0.00000001
+      use_nonmonotonic_step: False
+    override_with_gt: False
+
+  # RGN:
+  #   first_order:
+  #     max_iter: 0
+  #     num_backward_gaussians: 300
+  #   second_order:
+  #     max_iter: 30
+  #     num_backward_gaussians: -1
+  #     sketch_aspect: 2
+  #     initial_lambda: 0.01
+  #     max_lambda: 1000000000
+  #     min_lambda: 0.00000001
+  #     increase_factor: 2
+  #     decrease_factor: 3
+  #     trust_region_cutoff: 0.0001
+  #     converged_threshold: 0.00001
+  #     use_nonmonotonic_step: True
+  #   override_with_gt: False
+
+
   sketch_aspect: 2
-  num_backward_gaussians: 1000
+  num_backward_gaussians: 300
   lambda: 0.01
   max_lambda: 100000000
   min_lambda: 0.00001
   increase_factor: 4
   decrease_factor: 6
   max_iter_without_improvement: 10
-  second_order: True
+  second_order: False
   switch_to_first_order: False
+  override_with_gt: False
 
   lr:
     # cam_rot_delta: 0.0003
