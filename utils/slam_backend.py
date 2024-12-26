@@ -5,6 +5,8 @@ import torch
 import torch.multiprocessing as mp
 from tqdm import tqdm
 
+import os
+
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.loss_utils import l1_loss, ssim
 from utils.logging_utils import Log
@@ -366,16 +368,18 @@ class BackEnd(mp.Process):
 
     def run(self):
         while True:
+            sleep_time = 0.01
+            # sleep_time = 0.5
             if self.backend_queue.empty():
                 if self.pause:
-                    time.sleep(0.01)
+                    time.sleep(sleep_time)
                     continue
                 if len(self.current_window) == 0:
-                    time.sleep(0.01)
+                    time.sleep(sleep_time)
                     continue
 
                 if self.single_thread:
-                    time.sleep(0.01)
+                    time.sleep(sleep_time)
                     continue
                 self.map(self.current_window)
                 if self.last_sent >= 10:

@@ -48,6 +48,7 @@ Training:
       max_iter: 100
       fast_iter: 0
       num_backward_gaussians: -1
+      num_pixels: -1
     second_order:
       max_iter: 0
       num_backward_gaussians: 300
@@ -61,11 +62,16 @@ Training:
       converged_threshold: 0.00000001
       use_nonmonotonic_step: False
     override_with_gt: False
+    log_output: True
+    log_basedir: "outputs"
+    save_period: 10
 
   # RGN:
   #   first_order:
   #     max_iter: 0
+  #     fast_iter: 0
   #     num_backward_gaussians: 300
+  #     num_pixels: 300
   #   second_order:
   #     max_iter: 30
   #     num_backward_gaussians: -1
@@ -78,7 +84,9 @@ Training:
   #     trust_region_cutoff: 0.0001
   #     converged_threshold: 0.00001
   #     use_nonmonotonic_step: True
-  #   override_with_gt: False
+  #   override_with_gt: True
+  #   log_output: True
+  #   log_basedir: "outputs"
 
 
   sketch_aspect: 2

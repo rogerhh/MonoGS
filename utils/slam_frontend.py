@@ -6,6 +6,7 @@ import torch.multiprocessing as mp
 from copy import deepcopy
 import math
 import os
+import json
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
@@ -45,6 +46,40 @@ class FrontEnd(mp.Process):
         self.cameras = dict()
         self.device = "cuda:0"
         self.pause = False
+
+        # LM Parameters
+        self.first_order_max_iter = self.config["Training"]["RGN"]["first_order"]["max_iter"]
+        self.first_order_fast_iter = self.config["Training"]["RGN"]["first_order"]["fast_iter"]
+        self.first_order_num_backward_gaussians = self.config["Training"]["RGN"]["first_order"]["num_backward_gaussians"]
+        self.first_order_num_pixels = self.config["Training"]["RGN"]["first_order"]["num_pixels"]
+        self.second_order_max_iter = self.config["Training"]["RGN"]["second_order"]["max_iter"]
+        self.second_order_num_backward_gaussians = self.config["Training"]["RGN"]["second_order"]["num_backward_gaussians"]
+        self.sketch_aspect = self.config["Training"]["RGN"]["second_order"]["sketch_aspect"]
+        self.initial_lambda = self.config["Training"]["RGN"]["second_order"]["initial_lambda"]
+        self.max_lambda = self.config["Training"]["RGN"]["second_order"]["max_lambda"]
+        self.min_lambda = self.config["Training"]["RGN"]["second_order"]["min_lambda"]
+        self.increase_factor = self.config["Training"]["RGN"]["second_order"]["increase_factor"]
+        self.decrease_factor = self.config["Training"]["RGN"]["second_order"]["decrease_factor"]
+        self.trust_region_cutoff = self.config["Training"]["RGN"]["second_order"]["trust_region_cutoff"]
+        self.second_order_converged_threshold = self.config["Training"]["RGN"]["second_order"]["converged_threshold"]
+        self.use_nonmonotonic_step = self.config["Training"]["RGN"]["second_order"]["use_nonmonotonic_step"]
+        self.override_with_gt = self.config["Training"]["RGN"]["override_with_gt"]
+
+        self.log_output = self.config["Training"]["RGN"]["log_output"]
+        self.log_basedir = self.config["Training"]["RGN"]["log_basedir"]
+        self.log_path = time.strftime("%Y%m%d_%H%M")  # Set logfile base path to be yyyymmdd_HHMM
+        self.save_period = self.config["Training"]["RGN"]["save_period"]
+        self.all_profile_data = []
+
+        # Check if log_basedir/log_path exists
+        self.logdir = os.path.join(self.log_basedir, self.log_path)
+        if not os.path.exists(self.logdir):
+            os.makedirs(self.logdir)
+
+        # Dump the config to the logdir as a json file
+        with open(os.path.join(self.logdir, "config.json"), "w") as f:
+            json.dump(self.config, f)
+
 
     def set_hyperparams(self):
         self.save_dir = self.config["Results"]["save_dir"]
@@ -162,23 +197,26 @@ class FrontEnd(mp.Process):
                 "name": "exposure_b_{}".format(viewpoint.uid),
             }
         )
-
-        # LM Parameters
-        first_order_max_iter = self.config["Training"]["RGN"]["first_order"]["max_iter"]
-        first_order_fast_iter = self.config["Training"]["RGN"]["first_order"]["fast_iter"]
-        first_order_num_backward_gaussians = self.config["Training"]["RGN"]["first_order"]["num_backward_gaussians"]
-        second_order_max_iter = self.config["Training"]["RGN"]["second_order"]["max_iter"]
-        second_order_num_backward_gaussians = self.config["Training"]["RGN"]["second_order"]["num_backward_gaussians"]
-        sketch_aspect = self.config["Training"]["RGN"]["second_order"]["sketch_aspect"]
-        initial_lambda = self.config["Training"]["RGN"]["second_order"]["initial_lambda"]
-        max_lambda = self.config["Training"]["RGN"]["second_order"]["max_lambda"]
-        min_lambda = self.config["Training"]["RGN"]["second_order"]["min_lambda"]
-        increase_factor = self.config["Training"]["RGN"]["second_order"]["increase_factor"]
-        decrease_factor = self.config["Training"]["RGN"]["second_order"]["decrease_factor"]
-        trust_region_cutoff = self.config["Training"]["RGN"]["second_order"]["trust_region_cutoff"]
-        second_order_converged_threshold = self.config["Training"]["RGN"]["second_order"]["converged_threshold"]
-        use_nonmonotonic_step = self.config["Training"]["RGN"]["second_order"]["use_nonmonotonic_step"]
-        override_with_gt = self.config["Training"]["RGN"]["override_with_gt"]
+        
+        # LM Parameters for convenience
+        first_order_max_iter = self.first_order_max_iter
+        first_order_fast_iter = self.first_order_fast_iter
+        first_order_num_backward_gaussians = self.first_order_num_backward_gaussians
+        first_order_num_pixels = self.first_order_num_pixels
+        second_order_max_iter = self.second_order_max_iter
+        second_order_num_backward_gaussians = self.second_order_num_backward_gaussians
+        sketch_aspect = self.sketch_aspect
+        initial_lambda = self.initial_lambda
+        max_lambda = self.max_lambda
+        min_lambda = self.min_lambda
+        increase_factor = self.increase_factor
+        decrease_factor = self.decrease_factor
+        trust_region_cutoff = self.trust_region_cutoff
+        second_order_converged_threshold = self.second_order_converged_threshold
+        use_nonmonotonic_step = self.use_nonmonotonic_step
+        override_with_gt = self.override_with_gt
+        log_output = self.log_output
+        save_period = self.save_period
 
         max_iter = first_order_max_iter + second_order_max_iter
         in_second_order = False
@@ -194,8 +232,13 @@ class FrontEnd(mp.Process):
         H = None
         g = None
 
+        profile_data = {"timestamps": [], "losses": [], "pose": None}
+
         pose_optimizer = torch.optim.Adam(opt_params)
         for tracking_itr in range(max_iter):
+            if log_output:
+                profile_data["timestamps"].append(time.time())
+
             in_second_order = tracking_itr >= first_order_max_iter
 
             if tracking_itr == first_order_max_iter:
@@ -231,6 +274,9 @@ class FrontEnd(mp.Process):
             angle_error = angle_diff(viewpoint.R, viewpoint.R_gt)
             print(f"iter = {tracking_itr}, loss = {loss_tracking_scalar.item():.4f}, trans_error = {trans_error.item():.4f}, angle_error = {angle_error.item():.4f}, lambda = {lambda_:.4f}")
 
+            if log_output:
+                profile_data["losses"].append(loss_tracking_scalar.item())
+
             if loss_tracking_scalar < best_loss_scalar:
                 best_loss_scalar = loss_tracking_scalar
                 best_output = (viewpoint, render_pkg, image, depth, opacity, loss_tracking_img,)
@@ -263,13 +309,17 @@ class FrontEnd(mp.Process):
             if not in_second_order:
                 # Get l1 norm of loss_tracking
                 # DEBUG
-                # num_pixels = 300
-                # loss_tracking_vec = torch.abs(loss_tracking_img.flatten())
-                # dist = loss_tracking_vec / torch.sum(loss_tracking_vec) + 1e-8
-                # selected_indices = torch.multinomial(dist, num_pixels, replacement=False)
-                # loss_tracking_vec = loss_tracking_vec / dist
-                # loss_tracking = torch.sum(loss_tracking_vec[selected_indices])
-                # loss_tracking = loss_tracking / num_pixels
+                num_pixels = first_order_num_pixels
+                if num_pixels > 0:
+                    print(f"loss_tracking_img.shape = {loss_tracking_img.shape}")
+                    total_num_tiles = (loss_tracking_img.shape[1] // 16) * (loss_tracking_img.shape[2 // 16])
+                    print(f"total_num_tiles = {total_num_tiles}")
+                    # loss_tracking_vec = torch.abs(loss_tracking_img.flatten())
+                    # dist = loss_tracking_vec / torch.sum(loss_tracking_vec) + 1e-8
+                    # selected_indices = torch.multinomial(dist, num_pixels, replacement=False)
+                    # loss_tracking_vec = loss_tracking_vec / dist
+                    # loss_tracking = torch.sum(loss_tracking_vec[selected_indices])
+                    # loss_tracking = loss_tracking / num_pixels
 
                 # DEBUG END
 
@@ -324,7 +374,7 @@ class FrontEnd(mp.Process):
                     for i in range(d):
                         indices = sketch_indices[i]
                         sketch_len = len(indices)
-                        # This (m / d) is some weird normalization factor
+                        # This (m / d) is some weird normalization factor. Need this so that lambda is some sane relative value
                         loss_i = torch.sum(loss_tracking_vec[indices]) / (m / d)
 
                         with torch.no_grad():
@@ -335,13 +385,6 @@ class FrontEnd(mp.Process):
                             J[i, :] = torch.cat([viewpoint.cam_trans_delta.grad, viewpoint.cam_rot_delta.grad, viewpoint.exposure_a.grad, viewpoint.exposure_b.grad])
                             f[i] = loss_i
 
-                    # DEBUG
-                    # Compute the minimum singular value of J
-                    SJ = J * (m / d)
-                    _, s, _ = torch.svd(SJ)
-                    min_s = torch.min(s)
-                    print("min_s = ", min_s)
-                    # DEBUG END
 
                     with torch.no_grad():
                         H = J.T @ J
@@ -359,6 +402,19 @@ class FrontEnd(mp.Process):
                     new_viewpoint.exposure_b.data += x[7]
                     second_order_converged = update_pose(new_viewpoint, converged_threshold=second_order_converged_threshold)
 
+                    # DEBUG
+                    # Compute the minimum singular value of J
+                    SJ = J * (m / d)
+                    Sf = f * (m / d)
+                    _, s, _ = torch.svd(SJ)
+                    min_s = torch.min(s)
+                    # The residual is SJx - Sf
+                    Sr = SJ @ x - Sf
+
+                    print("min_s = ", min_s)
+                    print("Sr.norm() = ", Sr.norm())
+                    # DEBUG END
+
                     if second_order_converged:
                         print("Second order optimization converged")
                         break
@@ -375,6 +431,20 @@ class FrontEnd(mp.Process):
                         else np.zeros((viewpoint.image_height, viewpoint.image_width)),
                     )
                 )
+
+        if log_output:
+            profile_data["timestamps"].append(time.time())
+            profile_data["pose"] = [viewpoint.R, viewpoint.T]
+            profile_data["num_iters"] = tracking_itr
+
+            self.all_profile_data.append(profile_data)
+
+            if (cur_frame_idx + 1) % save_period == 0:
+                # Save to self.logdir/run-frame{cur_frame_idx}.pt
+                fname = f"run-frame{cur_frame_idx:06d}.pt"
+                print(f"Saving profile data to {os.path.join(self.logdir, fname)}")
+                torch.save(self.all_profile_data, os.path.join(self.logdir, fname))
+                self.all_profile_data = []
 
         print("Tracking converged in {} iterations".format(tracking_itr))
 
@@ -685,7 +755,6 @@ class FrontEnd(mp.Process):
                     time.sleep(max(0.01, 1.0 / 3.0 - duration / 1000))
             else:
                 data = self.frontend_queue.get()
-                print(f"Tag {data[0]}, Frontend queue size: {self.frontend_queue.qsize()}")
                 if data[0] == "sync_backend":
                     self.sync_backend(data)
 
