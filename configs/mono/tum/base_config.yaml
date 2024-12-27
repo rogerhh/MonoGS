@@ -66,27 +66,31 @@ Training:
     log_basedir: "outputs"
     save_period: 10
 
-  # RGN:
-  #   first_order:
-  #     max_iter: 0
-  #     fast_iter: 0
-  #     num_backward_gaussians: 300
-  #     num_pixels: 300
-  #   second_order:
-  #     max_iter: 30
-  #     num_backward_gaussians: -1
-  #     sketch_aspect: 2
-  #     initial_lambda: 0.01
-  #     max_lambda: 1000000000
-  #     min_lambda: 0.00000001
-  #     increase_factor: 2
-  #     decrease_factor: 3
-  #     trust_region_cutoff: 0.0001
-  #     converged_threshold: 0.00001
-  #     use_nonmonotonic_step: True
-  #   override_with_gt: True
-  #   log_output: True
-  #   log_basedir: "outputs"
+  RGN:
+    first_order:
+      max_iter: 0
+      fast_iter: 0
+      num_backward_gaussians: 300
+      num_pixels: 300
+    second_order:
+      max_iter: 30
+      num_backward_gaussians: -1
+      sketch_aspect: 2
+      initial_lambda: 0.01
+      max_lambda: 1000000000
+      min_lambda: 0.00000001
+      increase_factor: 2
+      decrease_factor: 3
+      trust_region_cutoff: 0.0001
+      converged_threshold: 0.00001
+      use_nonmonotonic_step: True
+    override:
+      mode: "gt"  # "gt" or "first"
+      first_logdir: "outputs/20241226_1242"
+      
+    override_with_gt: True
+    log_output: True
+    log_basedir: "outputs"
 
 
   sketch_aspect: 2
