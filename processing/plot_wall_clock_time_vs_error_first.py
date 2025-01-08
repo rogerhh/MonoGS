@@ -47,6 +47,17 @@ if __name__ == "__main__":
     ref_losses = ref_data["losses"]
     print(f"Frame {frame}")
 
+    iter_time_ms = [(data["timestamps"][i] - data["timestamps"][i-1]) * 1000 for i in range(1, len(data["timestamps"]))]
+    print(f"iter_time_ms: {iter_time_ms}")
+
+    if "render_time_ms" in data:
+        render_time_ms = data["render_time_ms"]
+        print(f"Render time: {render_time_ms}")
+
+    if "first_order_backward_time_ms" in data:
+        first_order_backward_time_ms = data["first_order_backward_time_ms"]
+        print(f"First order backward time: {first_order_backward_time_ms}")
+
     plt.figure(dpi=200, figsize=(12, 8))
 
     print(f"Losses: {losses}")

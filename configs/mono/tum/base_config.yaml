@@ -45,7 +45,7 @@ Training:
 
   RGN:
     first_order:
-      max_iter: 70
+      max_iter: 100
       fast_iter: 0
       num_backward_gaussians: -1
       num_pixels: -1
@@ -62,10 +62,10 @@ Training:
       converged_threshold: 0.00000001
       use_nonmonotonic_step: False
     override:
-      mode: "none"  # "gt" or "first" or "none"
-      first_logdir: "outputs/20250102_2011-firstonly"
-    print_output: True
-    log_output: False
+      mode: "first"  # "gt" or "first" or "none"
+      first_logdir: "outputs/20250106_1206-firstonly"
+    print_output: False
+    log_output: True
     log_basedir: "outputs"
     save_period: 10
 

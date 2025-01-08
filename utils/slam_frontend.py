@@ -44,6 +44,52 @@ class TempCamera:
         self.exposure_a.data += x[6]
         self.exposure_b.data += x[7]
 
+class SubsamplePixels(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, loss_tracking_img, num_pixels):
+        # Compute loss_tracking_vec1 and dist
+        loss_tracking_vec1 = torch.sum(torch.abs(loss_tracking_img), dim=0).flatten() + 1e-8
+        with torch.no_grad():
+            dist = loss_tracking_vec1 / torch.sum(loss_tracking_vec1)
+            selected_indices = torch.multinomial(dist, num_pixels, replacement=True)
+        
+        # Compute loss_tracking_vec and loss_tracking
+        loss_tracking_vec = loss_tracking_vec1 / dist
+        loss_tracking = torch.sum(loss_tracking_vec[selected_indices])
+        loss_tracking = loss_tracking / num_pixels
+
+        # Save tensors needed for backward
+        ctx.save_for_backward(loss_tracking_vec, dist, selected_indices)
+        ctx.num_pixels = num_pixels
+        ctx.img_shape = loss_tracking_img.shape
+
+        return loss_tracking, selected_indices
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_output_indices):
+        subsample_start = time.time()
+        
+        # Retrieve saved tensors and context
+        loss_tracking_vec, dist, selected_indices = ctx.saved_tensors
+        num_pixels = ctx.num_pixels
+
+        # Compute the gradient for loss_tracking_img
+        grad_loss_tracking_vec = torch.zeros_like(loss_tracking_vec)
+        grad_loss_tracking_vec[selected_indices] = grad_output / num_pixels
+
+        grad_loss_tracking_vec1 = grad_loss_tracking_vec / dist
+        grad_loss_tracking_img = grad_loss_tracking_vec1.view(ctx.img_shape[1:])
+        grad_loss_tracking_img = grad_loss_tracking_img.repeat(ctx.img_shape[0], 1, 1)
+        print(f"grad_loss_tracking_img.shape = {grad_loss_tracking_img.shape}")
+
+        subsample_end = time.time()
+        print(f"Subsample time ms: {(subsample_end - subsample_start) * 1000}")
+
+        # grad for num_pixels is None since it's not differentiable
+        return grad_loss_tracking_img, None
+
+
+
 class FrontEnd(mp.Process):
     def __init__(self, config):
         super().__init__()
@@ -268,10 +314,12 @@ class FrontEnd(mp.Process):
         H = None
         g = None
 
-        profile_data = {"timestamps": [], "losses": [], "pose": None}
+        profile_data = {"timestamps": [], "losses": [], "pose": None, "render_time_ms": [], "first_order_backward_time_ms": []}
 
         pose_optimizer = torch.optim.Adam(opt_params)
         for tracking_itr in range(max_iter):
+            # tracking_start = time.time()
+
             if log_output:
                 profile_data["timestamps"].append(time.time())
 
@@ -293,17 +341,18 @@ class FrontEnd(mp.Process):
 
             num_backward_gaussians = first_order_num_backward_gaussians if not in_second_order else second_order_num_backward_gaussians
             num_backward_gaussians = -1 if num_backward_gaussians <= 0 else num_backward_gaussians
-
             render_pkg = render(
                 viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=num_backward_gaussians
             )
+
+            # render_end = time.time()
+
             image, depth, opacity = (
                 render_pkg["render"],
                 render_pkg["depth"],
                 render_pkg["opacity"],
             )
-            # print(f"image grad_fn = {image._grad_fn}")
-            # image._grad_fn.sampled_pixel_indices = torch.tensor([0, 1, 2, 3, 5], device=image.device)
+
             loss_tracking_img = get_loss_tracking_per_pixel(
                 self.config, image, depth, opacity, viewpoint
             )
@@ -311,6 +360,8 @@ class FrontEnd(mp.Process):
             loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=2)
             trans_error = (viewpoint.T - viewpoint.T_gt).norm()
             angle_error = angle_diff(viewpoint.R, viewpoint.R_gt)
+
+            # compute_loss_end = time.time()
 
             if print_output:
                 print(f"iter = {tracking_itr}, loss = {loss_tracking_scalar.item():.4f}, trans_error = {trans_error.item():.4f}, angle_error = {angle_error.item():.4f}, lambda = {lambda_:.4f}")
@@ -349,49 +400,48 @@ class FrontEnd(mp.Process):
                     break
 
             if not in_second_order:
+                image._grad_fn.tracking = True
+
                 # Get l1 norm of loss_tracking
                 # DEBUG
                 num_pixels = first_order_num_pixels
                 if num_pixels > 0:
-                    # total_num_tiles = (loss_tracking_img.shape[1] // 16) * (loss_tracking_img.shape[2 // 16])
-                    # loss_tracking_vec = torch.abs(loss_tracking_img.flatten())
-                    # dist = loss_tracking_vec / torch.sum(loss_tracking_vec) + 1e-8
-                    # selected_indices = torch.multinomial(dist, num_pixels, replacement=False)
-                    # loss_tracking_vec = loss_tracking_vec / dist
-                    # loss_tracking = torch.sum(loss_tracking_vec[selected_indices])
-                    # loss_tracking = loss_tracking / num_pixels
                     # Need to first sum across channels
                     loss_tracking_vec1 = torch.sum(torch.abs(loss_tracking_img), dim=0).flatten() + 1e-8
                     with torch.no_grad():
                         dist = loss_tracking_vec1 / torch.sum(loss_tracking_vec1)
-                        selected_indices = torch.multinomial(dist, num_pixels, replacement=False)
+                        selected_pixel_indices = torch.multinomial(dist, num_pixels, replacement=True)
                     loss_tracking_vec = loss_tracking_vec1 / dist
-                    loss_tracking = torch.sum(loss_tracking_vec[selected_indices])
+                    loss_tracking = torch.sum(loss_tracking_vec[selected_pixel_indices])
                     loss_tracking = loss_tracking / num_pixels
+                    # loss_tracking, selected_pixel_indices = SubsamplePixels.apply(loss_tracking_img, num_pixels)
 
-                    image._grad_fn.select_pixels = False
-                    image._grad_fn.selected_pixel_indices = selected_indices
-                    print("we should not be here either")
+                    image._grad_fn.select_pixels = True
+                    image._grad_fn.selected_pixel_indices = selected_pixel_indices
 
                 # DEBUG END
 
                 else:
                     loss_tracking = torch.norm(loss_tracking_img.flatten(), p=1)
 
+                # subsample_end = time.time()
+
                 with torch.no_grad():
                     pose_optimizer.zero_grad()
                     loss_tracking.backward()
-                    # import code; code.interact(local=locals())
-                    # print("loss_tracking_vec1.grad = ", loss_tracking_vec1.grad)
-                    # print("exiting")
-                    # exit()
+                    first_order_backward_stats = image._grad_fn.stats
+                    profile_data["first_order_backward_time_ms"] = first_order_backward_stats["backward_time_ms"]
 
-                    # DEBUG
-                    grad = torch.cat([viewpoint.cam_trans_delta.grad, viewpoint.cam_rot_delta.grad, viewpoint.exposure_a.grad, viewpoint.exposure_b.grad])
-                    # DEBUG END
+                    # first_order_backward_end = time.time()
 
                     pose_optimizer.step()
+
+                    # optimizer_step_end = time.time()
+
+
                     first_order_converged = update_pose(viewpoint)
+
+                    # update_pose_end = time.time()
 
                 if first_order_converged:
                     print("First order optimization converged")
@@ -486,6 +536,21 @@ class FrontEnd(mp.Process):
                     )
                 )
 
+            # DEBUG
+            # tracking_end = time.time()
+
+            # render_time_ms = (render_end - tracking_start) * 1000
+            # compute_loss_time_ms = (compute_loss_end - render_end) * 1000
+            # subsample_time_ms = (subsample_end - compute_loss_end) * 1000
+            # first_order_backward_time_ms = (first_order_backward_end - subsample_end) * 1000
+            # optimizer_step_time_ms = (optimizer_step_end - first_order_backward_end) * 1000
+            # update_pose_time_ms = (update_pose_end - optimizer_step_end) * 1000
+            # tracking_time_ms = (tracking_end - tracking_start) * 1000
+
+            # print(f"render time ms: {render_time_ms:.4f}, compute loss time ms: {compute_loss_time_ms:.4f}, subsample time ms: {subsample_time_ms:.4f}, first order backward time ms: {first_order_backward_time_ms:.4f}, optimizer step time ms: {optimizer_step_time_ms:.4f}, update pose time ms: {update_pose_time_ms:.4f}, tracking time ms: {tracking_time_ms:.4f}")
+
+            # DEBUG END
+
         print("Tracking converged in {} iterations".format(tracking_itr))
 
         if override:
@@ -547,6 +612,7 @@ class FrontEnd(mp.Process):
                 self.all_profile_data = []
 
         self.median_depth = get_median_depth(depth, opacity)
+
         return render_pkg
 
     def is_keyframe(
