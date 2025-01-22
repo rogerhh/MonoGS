@@ -314,7 +314,7 @@ class FrontEnd(mp.Process):
         H = None
         g = None
 
-        profile_data = {"timestamps": [], "losses": [], "pose": None, "render_time_ms": [], "first_order_backward_time_ms": []}
+        profile_data = {"timestamps": [], "losses": [], "pose": None, "rasterize_gaussians_backward_time_ms": [], "rasterize_gaussians_C_backward_time_ms": []}
 
         pose_optimizer = torch.optim.Adam(opt_params)
         for tracking_itr in range(max_iter):
@@ -353,7 +353,7 @@ class FrontEnd(mp.Process):
                 render_pkg["opacity"],
             )
 
-            loss_tracking_img = get_loss_tracking_per_pixel(
+            loss_tracking_img, exposure_fn_tracker = get_loss_tracking_per_pixel(
                 self.config, image, depth, opacity, viewpoint
             )
 
@@ -430,7 +430,8 @@ class FrontEnd(mp.Process):
                     pose_optimizer.zero_grad()
                     loss_tracking.backward()
                     first_order_backward_stats = image._grad_fn.stats
-                    profile_data["first_order_backward_time_ms"] = first_order_backward_stats["backward_time_ms"]
+                    profile_data["rasterize_gaussians_backward_time_ms"].append(first_order_backward_stats["rasterize_gaussians_backward_time_ms"])
+                    profile_data["rasterize_gaussians_C_backward_time_ms"].append(first_order_backward_stats["rasterize_gaussians_C_backward_time_ms"])
 
                     # first_order_backward_end = time.time()
 
@@ -455,73 +456,74 @@ class FrontEnd(mp.Process):
                 # TEST END
 
             else:
-                loss_tracking_vec = loss_tracking_img.flatten()
+                if torch.isnan(loss_tracking_img).any():
+                    raise ValueError("Loss tracking image has nan values")
 
-                # check if loss_tracking_vec has nan values
-                if torch.isnan(loss_tracking_vec).any():
-                    raise ValueError("Loss tracking vector has nan values")
+                # Sum across channels. Now the dimensions are (h, w)
+                loss_tracking_img1 = torch.sum(loss_tracking_img, dim=0)
 
+                height, width = loss_tracking_img1.shape
                 n = (viewpoint.cam_trans_delta.shape[0] + viewpoint.cam_rot_delta.shape[0] + viewpoint.exposure_a.shape[0] + viewpoint.exposure_b.shape[0])
-                m = loss_tracking_vec.shape[0]
+                m = math.prod(loss_tracking_img1.shape)
                 d = sketch_aspect * n
 
-                # Only do backward passes if computing new hessian
-                if compute_new_hessian:
-                    # Instead of sampling indices, shuffle the indices then split them into d parts
-                    sketch_indices = torch.randperm(m)
-                    sketch_indices = torch.split(sketch_indices, m // d)
+                # First permute the flattened indices and split them into d parts
+                # We are okay with each part being roughly equal in size, with the last part being larger
+                chunk_sizes = [m // d] * d
+                chunk_sizes[-1] += m % d
+                rand_flat_indices = torch.randperm(m, device=loss_tracking_img1.device, dtype=torch.int32)
+                rand_indices_row = rand_flat_indices // width
+                rand_indices_col = rand_flat_indices % width
+                rand_indices_row = torch.split(rand_indices_row, chunk_sizes)
+                rand_indices_col = torch.split(rand_indices_col, chunk_sizes)
 
-                    J = torch.empty((d, n), device=loss_tracking_vec.device, requires_grad=False)
-                    f = torch.empty(d, device=loss_tracking_vec.device, requires_grad=False)
+                sketch_indices = torch.empty(loss_tracking_img1.shape, device=loss_tracking_img1.device, dtype=torch.long)
+                Sf = torch.empty(d, device=loss_tracking_img1.device, requires_grad=False)
 
-                    # Generate a vector (m, ) of either 1 or -1
-                    rand_weights = torch.randint(0, 2, (m,), device=loss_tracking_vec.device) * 2 - 1
-                    loss_tracking_vec = loss_tracking_vec * rand_weights
+                for i in range(d):
+                    sketch_indices[rand_indices_row[i], rand_indices_col[i]] = i
+                    Sf[i] = torch.sum(loss_tracking_img1[rand_indices_row[i], rand_indices_col[i]]) / chunk_sizes[i]
 
-                    for i in range(d):
-                        indices = sketch_indices[i]
-                        sketch_len = len(indices)
-                        # This (m / d) is some weird normalization factor. Need this so that lambda is some sane relative value
-                        loss_i = torch.sum(loss_tracking_vec[indices]) / (m / d)
+                phi = torch.sum(loss_tracking_img1) / (m / d)
 
-                        with torch.no_grad():
-                            # Reset grad first
-                            pose_optimizer.zero_grad()
-                            loss_i.backward(retain_graph=True)
+                image._grad_fn.sketch_mode = 1
+                image._grad_fn.sketch_dim = d
+                image._grad_fn.sketch_indices = sketch_indices
 
-                            J[i, :] = torch.cat([viewpoint.cam_trans_delta.grad, viewpoint.cam_rot_delta.grad, viewpoint.exposure_a.grad, viewpoint.exposure_b.grad])
-                            f[i] = loss_i
+                exposure_fn_tracker._grad_fn.sketch_mode = 1
+                exposure_fn_tracker._grad_fn.sketch_dim = d
+                exposure_fn_tracker._grad_fn.sketch_indices = sketch_indices
+                
+                pose_optimizer.zero_grad()
+                phi.backward()
 
-
-                    with torch.no_grad():
-                        H = J.T @ J
-                        g = J.T @ f
+                SJ = torch.cat((image.grad_fn.sketch_grad_tau, exposure_fn_tracker.grad_fn.sketch_grad_exposure_a, exposure_fn_tracker.grad_fn.sketch_grad_exposure_b), dim=1)
 
                 with torch.no_grad():
+                    H = SJ.T @ SJ
+                    g = SJ.T @ Sf
 
                     H_damp = H + torch.eye(n, device=H.device) * lambda_
                     x = torch.linalg.solve(H_damp, -g)
+
+                    distortion = math.sqrt(n / d)
+                    sigmas = torch.linalg.svdvals(SJ)
+                    min_sigma = sigmas[-1] + math.sqrt(lambda_)
+                    residual = torch.norm(Sf - SJ @ x) + math.sqrt(lambda_) * torch.norm(x)
+                    upperbound = residual * 2 * distortion * (1 + distortion) / (((1 - distortion) ** 2) * min_sigma)
+                    print(f"distortion = {distortion:.4f}, min_sigma = {min_sigma:.4f}, residual = {residual:.4f}, upperbound = {upperbound:.4f}")
 
                     new_viewpoint_params = TempCamera(viewpoint)
                     new_viewpoint_params.step(x)
                     second_order_converged = x.norm() < second_order_converged_threshold
 
-                    # # DEBUG
-                    # # Compute the minimum singular value of J
-                    # SJ = J * (m / d)
-                    # Sf = f * (m / d)
-                    # _, s, _ = torch.svd(SJ)
-                    # min_s = torch.min(s)
-                    # # The residual is SJx - Sf
-                    # Sr = SJ @ x - Sf
-
-                    # print("min_s = ", min_s)
-                    # print("Sr.norm() = ", Sr.norm())
-                    # # DEBUG END
-
                     if second_order_converged:
                         print("Second order optimization converged")
                         break
+
+
+                # input()
+
 
 
 
@@ -580,7 +582,7 @@ class FrontEnd(mp.Process):
                 render_pkg["opacity"],
             )
 
-            loss_tracking_img = get_loss_tracking_per_pixel(
+            loss_tracking_img, _ = get_loss_tracking_per_pixel(
                 self.config, image, depth, opacity, viewpoint
             )
 
