@@ -92,7 +92,6 @@ class ApplyExposure(torch.autograd.Function):
     @staticmethod
     def forward(ctx, image, exposure_a, exposure_b, exposure_eps):
         ctx.save_for_backward(image, exposure_a, exposure_b)
-        ctx.exposure_eps = exposure_eps
         # Use this to have easy access to this function
         fn_tracker = torch.zeros(0, requires_grad=True)
         ctx.sketch_mode = 0
@@ -102,9 +101,7 @@ class ApplyExposure(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output, grad_fn_tracker):
-        image, exposure_a, exposure_b = ctx.saved_tensors
-        exposure_eps = ctx.exposure_eps
-
+        image, exposure_a, exposure_b, = ctx.saved_tensors
         grad_output_image = grad_output * image
 
         if ctx.sketch_mode != 0:
@@ -120,7 +117,8 @@ class ApplyExposure(torch.autograd.Function):
             ctx.sketch_grad_exposure_a = sketch_grad_exposure_a
             ctx.sketch_grad_exposure_b = sketch_grad_exposure_b
 
-        grad_image = torch.sign(exposure_a) * exposure_a * grad_output
+        # grad_image = torch.sign(exposure_a) * exposure_a * grad_output
+        grad_image = torch.abs(exposure_a) * grad_output
         grad_exposure_a = torch.sum(grad_output_image).reshape(exposure_a.shape)
         grad_exposure_b = torch.sum(grad_output).reshape(exposure_b.shape)
         grad_exposure_eps = None
@@ -139,7 +137,8 @@ class ApplyExposure(torch.autograd.Function):
 
 
 def get_loss_tracking_per_pixel(config, image, depth, opacity, viewpoint, initialization=False):
-    # image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
+    # We need this but it seems to affect runtime quite a bit
+    # image_ab, fn_tracker = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b, None
     image_ab, fn_tracker = ApplyExposure.apply(image, viewpoint.exposure_a, viewpoint.exposure_b, viewpoint.exposure_eps)
     # image_ab = (torch.abs(viewpoint.exposure_a) + viewpoint.exposure_eps) * image + viewpoint.exposure_b
     if config["Training"]["monocular"]:

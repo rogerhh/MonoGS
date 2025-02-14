@@ -20,7 +20,7 @@ dependencies:
     - munch
     - trimesh
     - matplotlib==3.10.0
-    - evo==1.11.0
+    - evo==1.30.6
     - open3d==0.17.0
     - torchmetrics
     - imgviz
@@ -31,3 +31,4 @@ dependencies:
     - lpips
     - rich
     - ruff
+    - PyQt5

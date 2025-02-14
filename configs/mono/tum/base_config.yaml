@@ -43,40 +43,125 @@ Training:
   single_thread: True
   spherical_harmonics: False
 
-  RGN:
-    first_order:
-      max_iter: 100
-      fast_iter: 0
-      num_backward_gaussians: -1
-      num_pixels: -1
-    second_order:
-      max_iter: 0
-      num_backward_gaussians: 300
-      sketch_aspect: 2
-      initial_lambda: 0.01
-      max_lambda: 100000000
-      min_lambda: 0.00001
-      increase_factor: 2
-      decrease_factor: 3
-      trust_region_cutoff: 0.0001
-      converged_threshold: 0.00000001
-      use_nonmonotonic_step: False
-    override:
-      mode: "first"  # "gt" or "first" or "none"
-      first_logdir: "outputs/20250106_1206-firstonly"
-    print_output: False
-    log_output: True
-    log_basedir: "outputs"
-    save_period: 10
+  # # GT Run
+  # RGN:
+  #   pnorm: 1
+  #   first_order:
+  #     max_iter: 100
+  #     fast_iter: 0
+  #     num_backward_gaussians: -1
+  #     num_pixels: -1
+  #   second_order:
+  #     max_iter: 0
+  #     num_backward_gaussians: 300
+  #     sketch_aspect: 2
+  #     initial_lambda: 0.01
+  #     max_lambda: 100000000
+  #     min_lambda: 0.00001
+  #     increase_factor: 2
+  #     decrease_factor: 3
+  #     trust_region_cutoff: 0.0001
+  #     converged_threshold: 0.00000001
+  #     use_nonmonotonic_step: False
+  #   override:
+  #     mode: "gt"  # "gt" or "first" or "none"
+  #     first_logdir: "outputs/20250117-firstonly-loss-full"
+  #   print_output: False
+  #   log_output: False
+  #   log_basedir: "outputs"
+  #   save_period: 10
+  
+  # # First
+  # RGN:
+  #   pnorm: 1
+  #   first_order:
+  #     max_iter: 100
+  #     fast_iter: 0
+  #     num_backward_gaussians: -1
+  #     num_pixels: -1
+  #   second_order:
+  #     max_iter: 0
+  #     num_backward_gaussians: 300
+  #     sketch_aspect: 2
+  #     initial_lambda: 0.01
+  #     max_lambda: 100000000
+  #     min_lambda: 0.00001
+  #     increase_factor: 2
+  #     decrease_factor: 3
+  #     trust_region_cutoff: 0.0001
+  #     converged_threshold: 0.00000001
+  #     use_nonmonotonic_step: False
+  #   override:
+  #     mode: "none"  # "gt" or "first" or "none"
+  #     first_logdir: "outputs/20250117-firstonly-loss-full"
+  #   print_output: False
+  #   log_output: False
+  #   log_basedir: "outputs"
+  #   save_period: 10
 
   # RGN:
+  #   pnorm: 1
+  #   first_order:
+  #     max_iter: 100
+  #     fast_iter: 0
+  #     num_backward_gaussians: -1
+  #     num_pixels: -1
+  #   second_order:
+  #     max_iter: 0
+  #     num_backward_gaussians: 300
+  #     sketch_aspect: 2
+  #     initial_lambda: 0.01
+  #     max_lambda: 100000000
+  #     min_lambda: 0.00001
+  #     increase_factor: 2
+  #     decrease_factor: 3
+  #     trust_region_cutoff: 0.0001
+  #     converged_threshold: 0.00000001
+  #     use_nonmonotonic_step: False
+  #   override:
+  #     mode: "none"  # "gt" or "first" or "none"
+  #     first_logdir: "outputs/20250117-firstonly-loss-full"
+  #   print_output: True
+  #   log_output: False
+  #   log_basedir: "outputs"
+  #   save_period: 10
+
+  # RGN:
+  #   pnorm: 1
+  #   first_order:
+  #     max_iter: 60
+  #     fast_iter: 20
+  #     num_backward_gaussians: 3000
+  #     num_pixels: -1
+  #   second_order:
+  #     max_iter: 0
+  #     num_backward_gaussians: 300
+  #     sketch_aspect: 2
+  #     initial_lambda: 0.01
+  #     max_lambda: 100000000
+  #     min_lambda: 0.00001
+  #     increase_factor: 2
+  #     decrease_factor: 3
+  #     trust_region_cutoff: 0.0001
+  #     converged_threshold: 0.00000001
+  #     use_nonmonotonic_step: False
+  #   override:
+  #     mode: "none"  # "gt" or "first" or "none"
+  #     first_logdir: "outputs/20250107_2245-firstonly_backprop-profile"
+  #   print_output: True
+  #   log_output: False
+  #   log_basedir: "outputs"
+  #   save_period: 10
+
+  # RGN:
+  #   pnorm: 1
   #   first_order:
   #     max_iter: 0
   #     fast_iter: 0
   #     num_backward_gaussians: 300
   #     num_pixels: 300
   #   second_order:
-  #     max_iter: 5
+  #     max_iter: 20
   #     num_backward_gaussians: -1
   #     sketch_aspect: 2
   #     initial_lambda: 0.01
@@ -88,12 +173,96 @@ Training:
   #     converged_threshold: 0.00001
   #     use_nonmonotonic_step: True
   #   override:
-  #     mode: "first"  # "gt" or "first" or "none"
-  #     first_logdir: "outputs/20250101_1108"
+  #     mode: "none"  # "gt" or "first" or "none"
+  #     first_logdir: "outputs/20250107_2245-firstonly_backprop-profile"
   #   print_output: True
-  #   log_output: True
+  #   log_output: False
   #   log_basedir: "outputs"
   #   save_period: 10
+
+  # # Second override best
+  # RGN:
+  #   pnorm: 2
+  #   first_order:
+  #     max_iter: 0
+  #     fast_iter: 0
+  #     num_backward_gaussians: 300
+  #     num_pixels: 300
+  #   second_order:
+  #     max_iter: 20
+  #     num_backward_gaussians: -1
+  #     sketch_aspect: 4
+  #     initial_lambda: 0.1
+  #     max_lambda: 1000000000
+  #     min_lambda: 0.00000001
+  #     increase_factor: 1.0
+  #     decrease_factor: 1.0
+  #     trust_region_cutoff: 0.0001
+  #     converged_threshold: 0.00001
+  #     use_nonmonotonic_step: True
+  #   override:
+  #     mode: "best"  # "gt" or "first" or "none" or "best"
+  #     first_logdir: "outputs/20250126_1717-firstonly-loss-full"
+  #   print_output: True
+  #   log_output: False
+  #   log_basedir: "outputs"
+  #   save_period: 10
+  
+  # # Second only
+  # RGN:
+  #   pnorm: 2
+  #   first_order:
+  #     max_iter: 0
+  #     fast_iter: 0
+  #     num_backward_gaussians: 300
+  #     num_pixels: 300
+  #   second_order:
+  #     max_iter: 10
+  #     num_backward_gaussians: -1
+  #     sketch_aspect: 4
+  #     initial_lambda: 0.1
+  #     max_lambda: 1000000000
+  #     min_lambda: 0.00000001
+  #     increase_factor: 5.0
+  #     decrease_factor: 2.0
+  #     trust_region_cutoff: 0.0001
+  #     converged_threshold: 0.00001
+  #     use_nonmonotonic_step: False
+  #   override:
+  #     mode: "none"  # "gt" or "first" or "none" or "best"
+  #     first_logdir: "outputs/20250126_1717-firstonly-loss-full"
+  #   print_output: False
+  #   log_output: False
+  #   log_basedir: "outputs"
+  #   save_period: 10
+  
+  # Hybrid
+  RGN:
+    pnorm: 2
+    first_order:
+      max_iter: 20
+      fast_iter: 0
+      num_backward_gaussians: -1
+      num_pixels: -1
+    second_order:
+      max_iter: 5
+      num_backward_gaussians: -1
+      sketch_aspect: 4
+      initial_lambda: 0.01
+      max_lambda: 1000000000
+      min_lambda: 0.00000001
+      increase_factor: 1.0
+      decrease_factor: 1.0
+      trust_region_cutoff: 0.0001
+      converged_threshold: 0.00001
+      use_nonmonotonic_step: False
+    override:
+      mode: "none"  # "gt" or "first" or "none" or "best"
+      first_logdir: "outputs/20250126_1717-firstonly-loss-full"
+    print_output: False
+    log_output: False
+    log_basedir: "outputs"
+    save_period: 10
 
 
   sketch_aspect: 2
