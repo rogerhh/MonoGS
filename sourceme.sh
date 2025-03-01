@@ -9,3 +9,5 @@ if [ -z "$CONDA_PREFIX" ]; then
     return
 fi
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+
+export QT_QPA_PLATFORM=offscreen

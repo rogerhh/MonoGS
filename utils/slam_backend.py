@@ -40,6 +40,8 @@ class BackEnd(mp.Process):
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
 
+        self.save_initial_ply = config["Results"]["save_initial_ply"]
+
     def set_hyperparams(self):
         self.save_results = self.config["Results"]["save_results"]
 
@@ -113,6 +115,8 @@ class BackEnd(mp.Process):
             )
             loss_init.backward()
 
+            print(f"mapping_iteration: {mapping_iteration}, loss_init: {loss_init}")
+
             with torch.no_grad():
                 self.gaussians.max_radii2D[visibility_filter] = torch.max(
                     self.gaussians.max_radii2D[visibility_filter],
@@ -139,6 +143,14 @@ class BackEnd(mp.Process):
 
         self.occ_aware_visibility[cur_frame_idx] = (n_touched > 0).long()
         Log("Initialized map")
+
+        if self.save_initial_ply:
+            Log("Saving initial ply")
+            self.gaussians.save_ply(
+                os.path.join(self.config["Results"]["save_dir"], "frame1.ply")
+            )
+            exit()
+
         return render_pkg
 
     def map(self, current_window, prune=False, iters=1):
@@ -359,7 +371,7 @@ class BackEnd(mp.Process):
         keyframes = []
         for kf_idx in self.current_window:
             kf = self.viewpoints[kf_idx]
-            keyframes.append((kf_idx, kf.R.clone(), kf.T.clone()))
+            keyframes.append((kf_idx, kf.T.clone()))
         if tag is None:
             tag = "sync_backend"
 
@@ -383,7 +395,8 @@ class BackEnd(mp.Process):
                     continue
                 self.map(self.current_window)
                 if self.last_sent >= 10:
-                    self.map(self.current_window, prune=True, iters=10)
+                    self.map(self.current_window, 
+                             prune=True, iters=10)
                     self.push_to_frontend()
             else:
                 data = self.backend_queue.get()

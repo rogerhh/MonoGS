@@ -27,7 +27,6 @@ class SLAM:
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
 
-        start.record()
 
         self.config = config
         self.save_dir = save_dir
@@ -106,6 +105,7 @@ class SLAM:
             gui_process.start()
             time.sleep(5)
 
+        start.record()
         backend_process.start()
         self.frontend.run()
         backend_queue.put(["pause"])
@@ -226,7 +226,7 @@ if __name__ == "__main__":
         Log("\tuse_wandb=True")
         config["Results"]["use_wandb"] = True
 
-    if config["Results"]["save_results"]:
+    if config["Results"]["save_results"] or config["Results"]["save_initial_ply"]:
         mkdir_p(config["Results"]["save_dir"])
         current_datetime = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
         path = config["Dataset"]["dataset_path"].split("/")
