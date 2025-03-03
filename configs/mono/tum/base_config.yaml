@@ -6,6 +6,7 @@ Results:
   use_gui: False
   eval_rendering: False
   use_wandb: False
+  save_initial_ply: False # This quits the program after saving the initial ply file
 
 Dataset:
   type: 'tum'
@@ -47,7 +48,7 @@ Training:
   # RGN:
   #   pnorm: 1
   #   first_order:
-  #     max_iter: 100
+  #     max_iter: 1
   #     fast_iter: 0
   #     num_backward_gaussians: -1
   #     num_pixels: -1
@@ -208,35 +209,7 @@ Training:
   #   log_basedir: "outputs"
   #   save_period: 10
   
-  # # Second only
-  # RGN:
-  #   pnorm: 2
-  #   first_order:
-  #     max_iter: 0
-  #     fast_iter: 0
-  #     num_backward_gaussians: 300
-  #     num_pixels: 300
-  #   second_order:
-  #     max_iter: 10
-  #     num_backward_gaussians: -1
-  #     sketch_aspect: 4
-  #     initial_lambda: 0.1
-  #     max_lambda: 1000000000
-  #     min_lambda: 0.00000001
-  #     increase_factor: 5.0
-  #     decrease_factor: 2.0
-  #     trust_region_cutoff: 0.0001
-  #     converged_threshold: 0.00001
-  #     use_nonmonotonic_step: False
-  #   override:
-  #     mode: "none"  # "gt" or "first" or "none" or "best"
-  #     first_logdir: "outputs/20250126_1717-firstonly-loss-full"
-  #   print_output: False
-  #   log_output: False
-  #   log_basedir: "outputs"
-  #   save_period: 10
-  
-  # Hybrid
+  # Second only
   RGN:
     pnorm: 2
     first_order:
@@ -248,21 +221,51 @@ Training:
       max_iter: 5
       num_backward_gaussians: -1
       sketch_aspect: 4
-      initial_lambda: 0.01
+      initial_lambda: 1.0
       max_lambda: 1000000000
       min_lambda: 0.00000001
-      increase_factor: 1.0
-      decrease_factor: 1.0
+      increase_factor: 10.0
+      decrease_factor: 10.0
       trust_region_cutoff: 0.0001
-      converged_threshold: 0.00001
+      # converged_threshold: 0.000001
+      converged_threshold: 0.0
       use_nonmonotonic_step: False
     override:
       mode: "none"  # "gt" or "first" or "none" or "best"
       first_logdir: "outputs/20250126_1717-firstonly-loss-full"
-    print_output: False
+    use_best_loss: True
+    print_output: True
     log_output: False
     log_basedir: "outputs"
     save_period: 10
+  
+  # # Hybrid
+  # RGN:
+  #   pnorm: 2
+  #   first_order:
+  #     max_iter: 20
+  #     fast_iter: 0
+  #     num_backward_gaussians: -1
+  #     num_pixels: -1
+  #   second_order:
+  #     max_iter: 5
+  #     num_backward_gaussians: -1
+  #     sketch_aspect: 4
+  #     initial_lambda: 0.01
+  #     max_lambda: 1000000000
+  #     min_lambda: 0.00000001
+  #     increase_factor: 1.0
+  #     decrease_factor: 1.0
+  #     trust_region_cutoff: 0.0001
+  #     converged_threshold: 0.00001
+  #     use_nonmonotonic_step: False
+  #   override:
+  #     mode: "none"  # "gt" or "first" or "none" or "best"
+  #     first_logdir: "outputs/20250126_1717-firstonly-loss-full"
+  #   print_output: False
+  #   log_output: False
+  #   log_basedir: "outputs"
+  #   save_period: 10
 
 
   sketch_aspect: 2

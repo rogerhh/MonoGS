@@ -133,6 +133,7 @@ class FrontEnd(mp.Process):
         self.trust_region_cutoff = self.config["Training"]["RGN"]["second_order"]["trust_region_cutoff"]
         self.second_order_converged_threshold = self.config["Training"]["RGN"]["second_order"]["converged_threshold"]
         self.use_nonmonotonic_step = self.config["Training"]["RGN"]["second_order"]["use_nonmonotonic_step"]
+        self.use_best_loss = self.config["Training"]["RGN"]["use_best_loss"]
         self.override_mode = self.config["Training"]["RGN"]["override"]["mode"]
         self.override_first_logdir = self.config["Training"]["RGN"]["override"]["first_logdir"]
 
@@ -459,9 +460,9 @@ class FrontEnd(mp.Process):
                     if not use_nonmonotonic_step:
                         is_new_step = False
 
-                if lambda_ >= max_lambda:
-                    print(f"Trust region cutoff reached: {lambda_} >= {max_lambda}\nSecond order optimization converged")
-                    break
+                # if lambda_ >= max_lambda:
+                #     print(f"Trust region cutoff reached: {lambda_} >= {max_lambda}\nSecond order optimization converged")
+                #     break
 
             if not is_new_step:
                 old_viewpoint_params, render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, = old_output
@@ -614,9 +615,12 @@ class FrontEnd(mp.Process):
 
                     second_order_update_end = time.time()
 
+                    if print_output:
+                        print(f"step norm = {x.norm()}, lambda = {lambda_:.4f}")
+
                     if second_order_converged:
                         if print_output:
-                            print("Second order optimization converged")
+                            print(f"step norm {x.norm():.4f} < {second_order_converged_threshold}. Second order optimization converged")
                         break
 
                 second_order_solve_end = time.time()
@@ -734,6 +738,12 @@ class FrontEnd(mp.Process):
             if print_output:
                 print(f"override loss = {loss_tracking_scalar.item():.4f}") #, trans_error = {trans_error.item():.4f}, angle_error = {angle_error.item():.4f}, lambda = {lambda_:.4f}")
 
+        elif not self.use_best_loss:
+            old_viewpoint_params, render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, = old_output
+            old_viewpoint_params.assign(viewpoint)
+            loss_tracking_scalar = old_loss_scalar
+            if print_output:
+                print(f"Best loss = {old_loss_scalar.item():.4f}")
         else:
             best_viewpoint_params, render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, = best_output
             best_viewpoint_params.assign(viewpoint)
@@ -769,7 +779,8 @@ class FrontEnd(mp.Process):
                 print(f"Average second order ls solve time ms: {avg_second_order_ls_solve * 1000}")
                 print(f"Average second order update time ms: {avg_second_order_update * 1000}")
                 print(f"Average second order time ms: {avg_second_order_time * 1000}")
-            print(f"Projected tracking time = {(avg_first_order_time * 20 + avg_second_order_time * 5) * 1000}")
+            projected_tracking_time = (avg_first_order_time * first_order_max_iter + avg_second_order_time * second_order_max_iter)
+            print(f"Projected tracking time ms = {(projected_tracking_time) * 1000}")
             self.tracking_time_sum = 0
             self.first_order_time_sum = 0
             self.first_order_backward_sum = 0
@@ -1078,6 +1089,8 @@ class FrontEnd(mp.Process):
                     self.cleanup(cur_frame_idx)
                 cur_frame_idx += 1
 
+                print(f"{self.save_results} {self.save_trj} {create_kf} {len(self.kf_indices)} {self.save_trj_kf_intv}")
+
                 if (
                     self.save_results
                     and self.save_trj
@@ -1092,6 +1105,7 @@ class FrontEnd(mp.Process):
                         cur_frame_idx,
                         monocular=self.monocular,
                     )
+                    exit()
 
             else:
                 data = self.frontend_queue.get()

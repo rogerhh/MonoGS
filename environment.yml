@@ -6,7 +6,7 @@ channels:
 dependencies:
   - cuda-toolkit=12.6
   - plyfile=1.1
-  - python=3.10
+  - python=3.11
   - pip=24.3.1
   - pytorch=2.5.0
   - torchaudio=2.5.0
@@ -32,3 +32,5 @@ dependencies:
     - rich
     - ruff
     - PyQt5
+    - lycon
+    - lietorch==0.2

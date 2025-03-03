@@ -30,6 +30,7 @@ def render(
     override_color=None,
     mask=None,
     num_backward_gaussians=-1,
+    forward_sketch_args=None
 ):
     """
     Render the scene.
@@ -113,6 +114,16 @@ def render(
     else:
         colors_precomp = override_color
 
+    sketch_mode = 0
+    sketch_dim = 0
+    sketch_dtau = None
+    sketch_indices = None
+    if forward_sketch_args is not None:
+        sketch_mode = forward_sketch_args["sketch_mode"]
+        sketch_dim = forward_sketch_args["sketch_dim"]
+        sketch_dtau = forward_sketch_args["sketch_dtau"]
+        sketch_indices = forward_sketch_args["sketch_indices"]
+
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
     if mask is not None:
         rendered_image, radii, depth, opacity = rasterizer(
@@ -127,6 +138,10 @@ def render(
             theta=viewpoint_camera.cam_rot_delta,
             rho=viewpoint_camera.cam_trans_delta,
             num_backward_gaussians=num_backward_gaussians,
+            sketch_mode=sketch_mode,
+            sketch_dim=sketch_dim,
+            sketch_dtau=sketch_dtau,
+            sketch_indices=sketch_indices,
         )
     else:
         rendered_image, radii, depth, opacity, n_touched = rasterizer(
@@ -141,6 +156,10 @@ def render(
             theta=viewpoint_camera.cam_rot_delta,
             rho=viewpoint_camera.cam_trans_delta,
             num_backward_gaussians=num_backward_gaussians,
+            sketch_mode=sketch_mode,
+            sketch_dim=sketch_dim,
+            sketch_dtau=sketch_dtau,
+            sketch_indices=sketch_indices,
         )
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
