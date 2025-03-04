@@ -30,11 +30,15 @@ class TempCamera:
         self.exposure_b = viewpoint.exposure_b.detach().clone()
 
     def assign(self, viewpoint):
+        # viewpoint.cam_rot_delta.data.copy_(self.cam_rot_delta)
+        # viewpoint.cam_trans_delta.data.copy_(self.cam_trans_delta)
+        # viewpoint.exposure_a.data.copy_(self.exposure_a)
+        # viewpoint.exposure_b.data.copy_(self.exposure_b)
         viewpoint.T = self.T
-        viewpoint.cam_rot_delta.data.copy_(self.cam_rot_delta)
-        viewpoint.cam_trans_delta.data.copy_(self.cam_trans_delta)
-        viewpoint.exposure_a.data.copy_(self.exposure_a)
-        viewpoint.exposure_b.data.copy_(self.exposure_b)
+        viewpoint.cam_rot_delta = nn.Parameter(self.cam_rot_delta)
+        viewpoint.cam_trans_delta = nn.Parameter(self.cam_trans_delta)
+        viewpoint.exposure_a = nn.Parameter(self.exposure_a)
+        viewpoint.exposure_b = nn.Parameter(self.exposure_b)
 
     def step(self, x):
         self.cam_trans_delta.data += x[:3]
@@ -330,8 +334,8 @@ class FrontEnd(mp.Process):
 
         max_iter = first_order_max_iter + second_order_max_iter
         in_second_order = False
-        first_order_countdown = 8
-        second_order_count = 0
+        first_order_countdown = 10
+        second_order_countup = 0
 
         best_loss_scalar = float("inf")
         best_output = None
@@ -355,9 +359,9 @@ class FrontEnd(mp.Process):
             if log_output:
                 profile_data["timestamps"].append(time.time())
 
-            print(f"first_order_countdown = {first_order_countdown}, second_order_count = {second_order_count}")
-            in_second_order = first_order_countdown <= 0
-            first_order_countdown -= 1
+            in_second_order = tracking_itr >= first_order_max_iter
+            # in_second_order = first_order_countdown <= 0
+            # first_order_countdown -= 1
 
             if tracking_itr == first_order_max_iter:
                 if print_output:
@@ -370,11 +374,6 @@ class FrontEnd(mp.Process):
                 old_output = (TempCamera(viewpoint), render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, )
                 new_viewpoint_params.assign(viewpoint)
                 update_pose(viewpoint)
-                second_order_count += 1
-                if second_order_count >= second_order_max_iter:
-                    if print_output:
-                        print("Second order optimization converged")
-                    break
 
 
             forward_sketch_args = {"sketch_mode": 0, "sketch_dim": 0, "sketch_indices": None, "rand_indices": None, "sketch_dtau": None, "sketch_dexposure": None, }
@@ -461,19 +460,27 @@ class FrontEnd(mp.Process):
             is_new_step = True
             second_to_first = False
             if in_second_order and new_viewpoint_params is not None:
-                # If labmda is a high value but cost is not reduced
-                # revert to using first order method
-                if lambda_ >= 100 and loss_tracking_scalar > old_loss_scalar:
-                    lambda_ = initial_lambda
-                    is_new_step = True
-                    in_second_order = False
-                    first_order_countdown = 3
-                    second_order_count = 0
-                    second_to_first = True
-                    new_viewpoint_params = None
+                # if lambda_ <= 1 and loss_tracking_scalar < old_loss_scalar:
+                #     second_order_countup += 1
+
+                #     if second_order_countup >= second_order_max_iter:
+                #         if print_output:
+                #             print("Second order optimization converged")
+                #         break
+
+                # # If labmda is a high value but cost is not reduced
+                # # revert to using first order method
+                # if lambda_ >= 10 and loss_tracking_scalar > old_loss_scalar:
+                #     lambda_ = initial_lambda
+                #     is_new_step = True
+                #     in_second_order = False
+                #     first_order_countdown = 3
+                #     second_order_countup = 0
+                #     second_to_first = True
+                #     new_viewpoint_params = None
 
                 # If new step is better than old step, then take it
-                elif loss_tracking_scalar < old_loss_scalar:
+                if loss_tracking_scalar < old_loss_scalar:
                     lambda_ = max(lambda_ / decrease_factor, min_lambda)
                 else:
                     lambda_ = min(lambda_ * increase_factor, max_lambda)
@@ -493,8 +500,6 @@ class FrontEnd(mp.Process):
                 old_Sf = Sf
 
             forward_end = time.time()
-
-            print(f"new loss_tracking_scalar = {loss_tracking_scalar.item():.4f}")
 
             if not in_second_order:
                 first_order_opt_start = time.time()
@@ -1119,8 +1124,6 @@ class FrontEnd(mp.Process):
                     self.cleanup(cur_frame_idx)
                 cur_frame_idx += 1
 
-                print(f"{self.save_results} {self.save_trj} {create_kf} {len(self.kf_indices)} {self.save_trj_kf_intv}")
-
                 if (
                     self.save_results
                     and self.save_trj
@@ -1135,7 +1138,6 @@ class FrontEnd(mp.Process):
                         cur_frame_idx,
                         monocular=self.monocular,
                     )
-                    exit()
 
             else:
                 data = self.frontend_queue.get()

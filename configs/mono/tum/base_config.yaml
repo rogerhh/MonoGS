@@ -95,6 +95,7 @@ Training:
   #   override:
   #     mode: "none"  # "gt" or "first" or "none"
   #     first_logdir: "outputs/20250117-firstonly-loss-full"
+  #   use_best_loss: True
   #   print_output: False
   #   log_output: False
   #   log_basedir: "outputs"
@@ -209,41 +210,11 @@ Training:
   #   log_basedir: "outputs"
   #   save_period: 10
   
-  # Second only
-  RGN:
-    pnorm: 2
-    first_order:
-      max_iter: 20
-      fast_iter: 0
-      num_backward_gaussians: -1
-      num_pixels: -1
-    second_order:
-      max_iter: 5
-      num_backward_gaussians: -1
-      sketch_aspect: 4
-      initial_lambda: 1.0
-      max_lambda: 1000000000
-      min_lambda: 0.00000001
-      increase_factor: 10.0
-      decrease_factor: 10.0
-      trust_region_cutoff: 0.0001
-      # converged_threshold: 0.000001
-      converged_threshold: 0.0
-      use_nonmonotonic_step: False
-    override:
-      mode: "none"  # "gt" or "first" or "none" or "best"
-      first_logdir: "outputs/20250126_1717-firstonly-loss-full"
-    use_best_loss: True
-    print_output: True
-    log_output: False
-    log_basedir: "outputs"
-    save_period: 10
-  
-  # # Hybrid
+  # # Second only
   # RGN:
   #   pnorm: 2
   #   first_order:
-  #     max_iter: 20
+  #     max_iter: 40
   #     fast_iter: 0
   #     num_backward_gaussians: -1
   #     num_pixels: -1
@@ -262,10 +233,40 @@ Training:
   #   override:
   #     mode: "none"  # "gt" or "first" or "none" or "best"
   #     first_logdir: "outputs/20250126_1717-firstonly-loss-full"
+  #   use_best_loss: True
   #   print_output: False
   #   log_output: False
   #   log_basedir: "outputs"
   #   save_period: 10
+  
+  # Hybrid
+  RGN:
+    pnorm: 2
+    first_order:
+      max_iter: 20
+      fast_iter: 0
+      num_backward_gaussians: -1
+      num_pixels: -1
+    second_order:
+      max_iter: 5
+      num_backward_gaussians: -1
+      sketch_aspect: 4
+      initial_lambda: 0.01
+      max_lambda: 1000000000
+      min_lambda: 0.00000001
+      increase_factor: 2.0
+      decrease_factor: 3.0
+      trust_region_cutoff: 0.0001
+      converged_threshold: 0.00001
+      use_nonmonotonic_step: False
+    override:
+      mode: "none"  # "gt" or "first" or "none" or "best"
+      first_logdir: "outputs/20250126_1717-firstonly-loss-full"
+    use_best_loss: True
+    print_output: False
+    log_output: False
+    log_basedir: "outputs"
+    save_period: 10
 
 
   sketch_aspect: 2
