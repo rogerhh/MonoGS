@@ -31,10 +31,10 @@ class TempCamera:
 
     def assign(self, viewpoint):
         viewpoint.T = self.T
-        viewpoint.cam_rot_delta = nn.Parameter(self.cam_rot_delta)
-        viewpoint.cam_trans_delta = nn.Parameter(self.cam_trans_delta)
-        viewpoint.exposure_a = nn.Parameter(self.exposure_a)
-        viewpoint.exposure_b = nn.Parameter(self.exposure_b)
+        viewpoint.cam_rot_delta.data.copy_(self.cam_rot_delta)
+        viewpoint.cam_trans_delta.data.copy_(self.cam_trans_delta)
+        viewpoint.exposure_a.data.copy_(self.exposure_a)
+        viewpoint.exposure_b.data.copy_(self.exposure_b)
 
     def step(self, x):
         self.cam_trans_delta.data += x[:3]
@@ -330,6 +330,8 @@ class FrontEnd(mp.Process):
 
         max_iter = first_order_max_iter + second_order_max_iter
         in_second_order = False
+        first_order_countdown = 8
+        second_order_count = 0
 
         best_loss_scalar = float("inf")
         best_output = None
@@ -353,7 +355,9 @@ class FrontEnd(mp.Process):
             if log_output:
                 profile_data["timestamps"].append(time.time())
 
-            in_second_order = tracking_itr >= first_order_max_iter
+            print(f"first_order_countdown = {first_order_countdown}, second_order_count = {second_order_count}")
+            in_second_order = first_order_countdown <= 0
+            first_order_countdown -= 1
 
             if tracking_itr == first_order_max_iter:
                 if print_output:
@@ -366,6 +370,12 @@ class FrontEnd(mp.Process):
                 old_output = (TempCamera(viewpoint), render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, )
                 new_viewpoint_params.assign(viewpoint)
                 update_pose(viewpoint)
+                second_order_count += 1
+                if second_order_count >= second_order_max_iter:
+                    if print_output:
+                        print("Second order optimization converged")
+                    break
+
 
             forward_sketch_args = {"sketch_mode": 0, "sketch_dim": 0, "sketch_indices": None, "rand_indices": None, "sketch_dtau": None, "sketch_dexposure": None, }
 
@@ -449,10 +459,21 @@ class FrontEnd(mp.Process):
                 # best_angle_error = angle_error
 
             is_new_step = True
+            second_to_first = False
             if in_second_order and new_viewpoint_params is not None:
+                # If labmda is a high value but cost is not reduced
+                # revert to using first order method
+                if lambda_ >= 100 and loss_tracking_scalar > old_loss_scalar:
+                    lambda_ = initial_lambda
+                    is_new_step = True
+                    in_second_order = False
+                    first_order_countdown = 3
+                    second_order_count = 0
+                    second_to_first = True
+                    new_viewpoint_params = None
 
                 # If new step is better than old step, then take it
-                if loss_tracking_scalar < old_loss_scalar:
+                elif loss_tracking_scalar < old_loss_scalar:
                     lambda_ = max(lambda_ / decrease_factor, min_lambda)
                 else:
                     lambda_ = min(lambda_ * increase_factor, max_lambda)
@@ -472,6 +493,8 @@ class FrontEnd(mp.Process):
                 old_Sf = Sf
 
             forward_end = time.time()
+
+            print(f"new loss_tracking_scalar = {loss_tracking_scalar.item():.4f}")
 
             if not in_second_order:
                 first_order_opt_start = time.time()
@@ -508,11 +531,18 @@ class FrontEnd(mp.Process):
                     first_order_backward_start = time.time()
                     pose_optimizer.zero_grad()
                     loss_tracking.backward()
+
                     first_order_backward_end = time.time()
                     # profile_data["rasterize_gaussians_backward_time_ms"].append(first_order_backward_stats["rasterize_gaussians_backward_time_ms"])
                     # profile_data["rasterize_gaussians_C_backward_time_ms"].append(first_order_backward_stats["rasterize_gaussians_C_backward_time_ms"])
 
                     pose_optimizer.step()
+
+                    # if second_to_first:
+                    #     tau = torch.cat([viewpoint.cam_trans_delta,
+                    #                      viewpoint.cam_rot_delta], axis=0)
+                    #     print(f"step norm = {(tau**2).sum().sqrt().item():.4f}")
+                    #     import code; code.interact(local=locals())
 
                     first_order_step_end = time.time()
 
