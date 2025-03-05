@@ -251,11 +251,11 @@ Training:
       max_iter: 5
       num_backward_gaussians: -1
       sketch_aspect: 4
-      initial_lambda: 0.01
-      max_lambda: 1000000000
-      min_lambda: 0.00000001
-      increase_factor: 2.0
-      decrease_factor: 3.0
+      initial_lambda: 0.001
+      max_lambda: 10000000
+      min_lambda: 0.000001
+      increase_factor: 1.0
+      decrease_factor: 1.0
       trust_region_cutoff: 0.0001
       converged_threshold: 0.00001
       use_nonmonotonic_step: False
@@ -263,10 +263,12 @@ Training:
       mode: "none"  # "gt" or "first" or "none" or "best"
       first_logdir: "outputs/20250126_1717-firstonly-loss-full"
     use_best_loss: True
-    print_output: False
+    print_output: True
     log_output: False
     log_basedir: "outputs"
     save_period: 10
+
+  experiment_step: 63
 
 
   sketch_aspect: 2
