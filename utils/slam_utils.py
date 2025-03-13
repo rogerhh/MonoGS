@@ -1,5 +1,6 @@
 import torch
 import time
+import math
 
 
 def image_gradient(image):
@@ -53,6 +54,31 @@ def depth_reg(depth, gt_image, huber_eps=0.1, mask=None):
     ).mean()
     return err
 
+class HuberLoss(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, delta=0.1):
+        ctx.delta = delta
+        signs = torch.sign(x)
+        ctx.save_for_backward(x)
+        delta_sq = delta ** 2
+        loss = torch.where(x.abs() < delta, x, torch.sqrt(2 * delta * x.abs() - delta_sq) * signs)
+        return loss
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        delta = ctx.delta
+        x, = ctx.saved_tensors
+        signs = torch.sign(x)
+        delta_sq = delta ** 2
+        grad_input = torch.where(x.abs() < delta, grad_output, grad_output * delta / torch.sqrt(2 * delta * x.abs() - delta_sq))
+        return grad_input, None
+
+def huber_loss(x, delta=0.1):
+    delta_sq = delta ** 2
+    import code; code.interact(local=locals())
+    loss = torch.where(x.abs() < delta, x.abs(), torch.sqrt(2 * delta * x.abs() - delta_sq))
+    # loss = torch.abs(x)
+    return loss
 
 def get_loss_tracking(config, image, depth, opacity, viewpoint, initialization=False):
     # image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b

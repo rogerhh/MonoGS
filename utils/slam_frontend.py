@@ -8,6 +8,10 @@ from copy import deepcopy, copy
 import math
 import os
 import json
+import cv2
+import scipy.stats as stats
+import matplotlib.pyplot as plt
+import matplotlib
 
 from gaussian_splatting.gaussian_renderer import render
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2
@@ -16,8 +20,8 @@ from utils.camera_utils import Camera, CameraMsg
 from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
-from utils.pose_utils import update_pose, angle_diff
-from utils.slam_utils import get_loss_tracking, get_loss_tracking_per_pixel, get_median_depth
+from utils.pose_utils import update_pose, trans_diff, angle_diff, pose_diff, relative_pose_error
+from utils.slam_utils import get_loss_tracking, get_loss_tracking_per_pixel, get_median_depth, HuberLoss
 from processing.utils import load_data
 
 class TempCamera:
@@ -129,6 +133,8 @@ class FrontEnd(mp.Process):
         self.second_order_max_iter = self.config["Training"]["RGN"]["second_order"]["max_iter"]
         self.second_order_num_backward_gaussians = self.config["Training"]["RGN"]["second_order"]["num_backward_gaussians"]
         self.pnorm = self.config["Training"]["RGN"]["pnorm"]
+        self.use_huber = self.config["Training"]["RGN"]["use_huber"]
+        self.huber_delta = self.config["Training"]["RGN"]["huber_delta"]
         self.sketch_aspect = self.config["Training"]["RGN"]["second_order"]["sketch_aspect"]
         self.initial_lambda = self.config["Training"]["RGN"]["second_order"]["initial_lambda"]
         self.max_lambda = self.config["Training"]["RGN"]["second_order"]["max_lambda"]
@@ -138,6 +144,7 @@ class FrontEnd(mp.Process):
         self.trust_region_cutoff = self.config["Training"]["RGN"]["second_order"]["trust_region_cutoff"]
         self.second_order_converged_threshold = self.config["Training"]["RGN"]["second_order"]["converged_threshold"]
         self.use_nonmonotonic_step = self.config["Training"]["RGN"]["second_order"]["use_nonmonotonic_step"]
+        self.use_first_order_best = self.config["Training"]["RGN"]["second_order"]["use_first_order_best"]
         self.use_best_loss = self.config["Training"]["RGN"]["use_best_loss"]
         self.override_mode = self.config["Training"]["RGN"]["override"]["mode"]
         self.override_first_logdir = self.config["Training"]["RGN"]["override"]["first_logdir"]
@@ -176,6 +183,8 @@ class FrontEnd(mp.Process):
         self.second_order_ls_solve_sum = 0
         self.second_order_update_sum = 0
         self.second_order_count = 0
+
+        self.last_kf_idx = 1
 
 
     def set_hyperparams(self):
@@ -267,13 +276,40 @@ class FrontEnd(mp.Process):
         self.request_init(cur_frame_idx, viewpoint, depth_map)
         self.reset = False
 
+    def gen_forward_sketch_args(self, height, width, tau_len, exposure_len, d):
+        n = tau_len + exposure_len
+        m = height * width
+
+        # First permute the flattened indices and split them into d parts
+        # Each part must be equal in size so we can stack them into a tensor
+        chunk_size = m // d
+        rand_flat_indices = torch.randperm(m, device=self.device, dtype=torch.int32)
+        rand_indices_row = rand_flat_indices // width
+        rand_indices_col = rand_flat_indices % width
+        rand_indices_row = rand_indices_row.reshape((d, -1))
+        rand_indices_col = rand_indices_col.reshape((d, -1))
+        rand_indices = (rand_indices_row, rand_indices_col)
+        rand_weights = torch.randint(0, 2, size=(height, width), device=self.device, dtype=torch.float32) * 2 - 1
+
+        sketch_indices = torch.ones((height, width), device=self.device, dtype=torch.int32) * (-1)
+
+        i_values = torch.arange(d, device=self.device, dtype=torch.int32).view(-1, 1).expand(-1, chunk_size)
+
+        sketch_indices[rand_indices_row, rand_indices_col] = i_values
+
+        # This is used to pass into forward functions so we can recover the grad
+        sketch_dtau = torch.empty((d, tau_len), device=self.device, dtype=torch.float32, requires_grad=True)
+        sketch_dexposure = torch.empty((d, exposure_len), device=self.device, dtype=torch.float32, requires_grad=True)
+
+        forward_sketch_args = {"sketch_mode": 1, "sketch_dim": d, "sketch_indices": sketch_indices, "rand_indices": rand_indices, "sketch_dtau": sketch_dtau, "sketch_dexposure": sketch_dexposure, "chunk_size": chunk_size, "rand_weights": rand_weights, "rand_indices_row": rand_indices_row, "rand_indices_col": rand_indices_col, }
+        return forward_sketch_args
+
     def tracking(self, cur_frame_idx, viewpoint):
         print(f"Frame: {cur_frame_idx}")
 
         if cur_frame_idx == self.experiment_step:
             return self.tracking_experiment(cur_frame_idx, viewpoint)
             exit()
-
 
         if self.initialized and cur_frame_idx > self.constant_velocity_warmup and self.monocular:
             prev_prev = self.cameras[cur_frame_idx - self.use_every_n_frames -1 ]
@@ -284,7 +320,9 @@ class FrontEnd(mp.Process):
             velocity = pose_prev @ torch.linalg.inv(pose_prev_prev)
             pose_new = velocity @ pose_prev
             viewpoint.T = pose_new
+            viewpoint.T = pose_prev
         else:
+            # if True:
             prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
             viewpoint.T = prev.T
 
@@ -346,6 +384,7 @@ class FrontEnd(mp.Process):
         second_order_countup = 0
 
         best_loss_scalar = float("inf")
+        best_trans_error = float("inf")
         best_output = None
         best_viewpoint_params = None
         # best_trans_error = float("inf")
@@ -356,6 +395,13 @@ class FrontEnd(mp.Process):
         Sf = None
         H = None
         g = None
+        avg_len = 0
+        x_avg = None
+
+        last_kf = self.cameras[self.last_kf_idx]
+
+        covar = torch.eye(8, device=self.device, dtype=torch.float32, requires_grad=False)
+        covar[range(3, 6), range(3, 6)] = 0.3
 
         forward_sketch_args = {"sketch_mode": 0, "sketch_dim": 0, "sketch_indices": None, "rand_indices": None, "sketch_dtau": None, "sketch_dexposure": None, }
 
@@ -377,11 +423,8 @@ class FrontEnd(mp.Process):
                 if print_output:
                     print("Switching to second order optimization")
 
-                # DEBUG
-                # Use current best
-                if best_viewpoint_params is not None:
+                if best_viewpoint_params is not None and self.use_first_order_best:
                     best_viewpoint_params.assign(viewpoint)
-                # DEBUG END
 
             # If in second order and new_viewpoint_params is not None
             # Then cache the old data
@@ -390,8 +433,6 @@ class FrontEnd(mp.Process):
                 old_output = (TempCamera(viewpoint), render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, )
                 new_viewpoint_params.assign(viewpoint)
                 update_pose(viewpoint)
-
-                print(f"after swap viewpoint.T = {viewpoint.T}")
 
             # Set up sketching in the forward pass
             if in_second_order:
@@ -444,7 +485,6 @@ class FrontEnd(mp.Process):
             )
 
             render_end = time.time()
-            # print(f"Render time ms: {(render_end - tracking_iter_start) * 1000}")
 
             image, depth, opacity = (
                 render_pkg["render"],
@@ -455,18 +495,22 @@ class FrontEnd(mp.Process):
             loss_tracking_img = get_loss_tracking_per_pixel(
                 self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
             )
+            if self.use_huber:
+                loss_tracking_img = HuberLoss.apply(loss_tracking_img, self.huber_delta)
 
             loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=1)
-            # trans_error = (viewpoint.T - viewpoint.T_gt).norm()
-            # angle_error = angle_diff(viewpoint.R, viewpoint.R_gt)
+            trans_error, angle_error = relative_pose_error(last_kf.T_gt, viewpoint.T_gt, last_kf.T, viewpoint.T)
 
             if print_output:
-                print(f"iter = {tracking_itr}, loss = {loss_tracking_scalar.item():.4f}") #, trans_error = {trans_error.item():.4f}, angle_error = {angle_error.item():.4f}, lambda = {lambda_:.4f}")
+                print(f"iter = {tracking_itr}, loss = {loss_tracking_scalar.item():.4f}, trans_error = {trans_error:.4f}, angle_error = {angle_error:.4f}")
 
             if log_output:
                 profile_data["losses"].append(loss_tracking_scalar.item())
 
+            # DEBUG
             if loss_tracking_scalar < best_loss_scalar:
+            # if 0.5 * trans_error + angle_error < best_trans_error:
+                # best_trans_error = 0.5 * trans_error + angle_error
                 best_loss_scalar = loss_tracking_scalar
                 best_viewpoint_params = TempCamera(viewpoint)
                 best_output = (best_viewpoint_params, render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, )
@@ -476,25 +520,6 @@ class FrontEnd(mp.Process):
             is_new_step = True
             second_to_first = False
             if in_second_order and new_viewpoint_params is not None:
-                # if lambda_ <= 1 and loss_tracking_scalar < old_loss_scalar:
-                #     second_order_countup += 1
-
-                #     if second_order_countup >= second_order_max_iter:
-                #         if print_output:
-                #             print("Second order optimization converged")
-                #         break
-
-                # # If labmda is a high value but cost is not reduced
-                # # revert to using first order method
-                # if lambda_ >= 10 and loss_tracking_scalar > old_loss_scalar:
-                #     lambda_ = initial_lambda
-                #     is_new_step = True
-                #     in_second_order = False
-                #     first_order_countdown = 3
-                #     second_order_countup = 0
-                #     second_to_first = True
-                #     new_viewpoint_params = None
-
                 # If new step is better than old step, then take it
                 if loss_tracking_scalar < old_loss_scalar:
                     lambda_ = max(lambda_ / decrease_factor, min_lambda)
@@ -507,6 +532,10 @@ class FrontEnd(mp.Process):
                 # if lambda_ >= max_lambda:
                 #     print(f"Trust region cutoff reached: {lambda_} >= {max_lambda}\nSecond order optimization converged")
                 #     break
+
+                # # DEBUG
+                # is_new_step = False
+                # # DEBUG END
 
             if not is_new_step:
                 old_viewpoint_params, _, _, _, _, _, _, = old_output
@@ -527,6 +556,8 @@ class FrontEnd(mp.Process):
                 loss_tracking_img = get_loss_tracking_per_pixel(
                     self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
                 )
+                if self.use_huber:
+                    loss_tracking_img = HuberLoss.apply(loss_tracking_img, self.huber_delta)
 
             forward_end = time.time()
 
@@ -572,6 +603,8 @@ class FrontEnd(mp.Process):
 
                     pose_optimizer.step()
 
+                    # print("x = ", viewpoint.cam_trans_delta, viewpoint.cam_rot_delta, viewpoint.exposure_a, viewpoint.exposure_b)
+
                     # if second_to_first:
                     #     tau = torch.cat([viewpoint.cam_trans_delta,
                     #                      viewpoint.cam_rot_delta], axis=0)
@@ -597,13 +630,6 @@ class FrontEnd(mp.Process):
                         print("First order optimization converged")
                     break
 
-                # TEST
-                # mplier = 1.1
-                # first_order_num_backward_gaussians = int(first_order_num_backward_gaussians * mplier)
-                # if first_order_num_backward_gaussians > 10000 or first_order_num_backward_gaussians < 0:
-                #     first_order_num_backward_gaussians = -1
-                # TEST END
-
             else:
 
                 if torch.isnan(loss_tracking_img).any():
@@ -611,10 +637,6 @@ class FrontEnd(mp.Process):
 
                 second_order_setup_start = time.time()
 
-                # Sum across channels. Now the dimensions are (h, w)
-                # We need to do this because it is more efficient to parallelize across pixels than across channels
-                # Absolute values mess up the gradient at 0
-                # so to include information from the channels, we weight each channel loss by random +-1
                 loss_tracking_img1 = torch.sum(loss_tracking_img * rand_weights, dim=0)
 
                 if self.pnorm == 2:
@@ -625,9 +647,8 @@ class FrontEnd(mp.Process):
                     print(loss_tracking_img1)
                     print(torch.isnan(loss_tracking_img1).any())
 
-                Sf = torch.empty(d, device=loss_tracking_img1.device, requires_grad=False)
                 Sf = torch.sum(loss_tracking_img1[rand_indices_row, rand_indices_col], dim=1) / chunk_size
-
+                Sf0 = Sf[0]
                 phi = torch.sum(loss_tracking_img1) / (m / d)
 
                 # torch.cuda.synchronize()
@@ -654,6 +675,7 @@ class FrontEnd(mp.Process):
                     SJ = torch.cat((forward_sketch_args["sketch_dtau"].grad, forward_sketch_args["sketch_dexposure"].grad), dim=1)
 
                     if not is_new_step:
+                        # eta = 1
                         SJ = torch.cat((SJ, old_SJ), dim=0)
                         Sf = torch.cat((Sf, old_Sf), dim=0)
                         assert(SJ.shape[0] % d == 0)
@@ -661,10 +683,10 @@ class FrontEnd(mp.Process):
                     else:
                         eta = 1
 
-
                     damped_SJ = torch.cat((SJ / math.sqrt(eta), torch.eye(n, device=self.device) * math.sqrt(lambda_)), dim=0)
                     damped_Sf = torch.cat((Sf / math.sqrt(eta), torch.zeros(n, device=self.device)), dim=0)
-                    x = torch.linalg.lstsq(damped_SJ, -damped_Sf).solution
+
+                    x = torch.linalg.lstsq(damped_SJ / math.sqrt(eta), -damped_Sf / math.sqrt(eta)).solution
 
                     # H = SJ.T @ SJ / eta
                     # g = SJ.T @ Sf / eta
@@ -696,15 +718,16 @@ class FrontEnd(mp.Process):
                     loss_tracking_img = get_loss_tracking_per_pixel(
                         self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
                     )
+                    if self.use_huber:
+                        loss_tracking_img = HuberLoss.apply(loss_tracking_img, self.huber_delta)
 
                     loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=1)
-                    print(f"Right after update lambda = {lambda_}, loss = {loss_tracking_scalar.item()}\n\n")
-                    print(f"viewpoint.T = {viewpoint.T}")
 
                     second_order_update_end = time.time()
 
                     if print_output:
                         print(f"step norm = {x.norm()}, lambda = {lambda_:.4f}")
+                        # print(f"x = {x}")
 
                     if second_order_converged:
                         if print_output:
@@ -818,6 +841,8 @@ class FrontEnd(mp.Process):
             loss_tracking_img = get_loss_tracking_per_pixel(
                 self.config, image, depth, opacity, viewpoint
             )
+            if self.use_huber:
+                loss_tracking_img = HuberLoss.apply(loss_tracking_img, self.huber_delta)
 
             loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=2)
             # trans_error = (viewpoint.T - viewpoint.T_gt).norm()
@@ -827,19 +852,19 @@ class FrontEnd(mp.Process):
                 print(f"override loss = {loss_tracking_scalar.item():.4f}") #, trans_error = {trans_error.item():.4f}, angle_error = {angle_error.item():.4f}, lambda = {lambda_:.4f}")
 
         elif not self.use_best_loss:
-            old_viewpoint_params, render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, = old_output
-            old_viewpoint_params.assign(viewpoint)
-            loss_tracking_scalar = old_loss_scalar
+            # old_viewpoint_params, render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, = old_output
+            # old_viewpoint_params.assign(viewpoint)
+            # loss_tracking_scalar = old_loss_scalar
             trans_error = (viewpoint.T - viewpoint.T_gt).norm()
             if print_output:
-                print(f"Best loss = {old_loss_scalar.item():.4f}, trans error = {trans_error.item():.4f}")
+                print(f"Last loss = {old_loss_scalar.item():.4f}, trans error = {trans_error.item():.4f}")
         else:
             best_viewpoint_params, render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, = best_output
             best_viewpoint_params.assign(viewpoint)
             loss_tracking_scalar = best_loss_scalar
-            trans_error = (viewpoint.T - viewpoint.T_gt).norm()
+            trans_error, angle_error = relative_pose_error(last_kf.T_gt, viewpoint.T_gt, last_kf.T, viewpoint.T)
             if print_output:
-                print(f"Best loss = {best_loss_scalar.item():.4f}, Best trans error = {trans_error.item():.4f}") #, best angle error = {best_angle_error.item():.4f}")
+                print(f"Best loss = {best_loss_scalar.item():.4f}, Best trans error = {trans_error.item():.4f}, best angle error = {angle_error.item():.4f}")
 
         tracking_end = time.time()
         # print(f"Tracking time ms: {(tracking_end - tracking_start) * 1000}")
@@ -960,6 +985,7 @@ class FrontEnd(mp.Process):
         second_order_num_backward_gaussians = self.second_order_num_backward_gaussians
         # sketch_aspect = self.sketch_aspect
         sketch_aspect = 4
+        stack_aspect = 4
         initial_lambda = self.initial_lambda
         max_lambda = self.max_lambda
         min_lambda = self.min_lambda
@@ -973,14 +999,16 @@ class FrontEnd(mp.Process):
         print_output = self.print_output
         log_output = self.log_output
         save_period = self.save_period
-        lambda_ = initial_lambda
+        # lambda_ = initial_lambda
+        lambda_ = 1
 
         best_loss_scalar = float("inf")
         best_viewpoint_params = None
 
-        forward_sketch_args = {"sketch_mode": 0, "sketch_dim": 0, "sketch_indices": None, "rand_indices": None, "sketch_dtau": None, "sketch_dexposure": None, }
+        forward_sketch_args = {"sketch_mode": 0, "sketch_dim": 0, "sketch_indices": None, "rand_indices": None, "sketch_dtau": None, "sketch_dexposure": None, "chunk_size": None, "rand_weights": None, }
 
-        warmup_iter = first_order_max_iter
+        # warmup_iter = first_order_max_iter
+        warmup_iter = 10
 
         # First run some iterations of first order optimization
         pose_optimizer = torch.optim.Adam(opt_params)
@@ -997,11 +1025,12 @@ class FrontEnd(mp.Process):
             loss_tracking_img = get_loss_tracking_per_pixel(
                 self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
             )
+            loss_tracking_img = HuberLoss.apply(loss_tracking_img, 0.1)
 
             loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=1)
             l2_loss = torch.norm(loss_tracking_img.flatten(), p=2)
-            trans_error = (viewpoint.T - viewpoint.T_gt).norm()
-            print(f"iter = {tracking_itr}, loss = {loss_tracking_scalar.item():.4f}, l2 loss = {l2_loss.item():.4f}, trans error = {trans_error.item():.4f}")
+            trans_error, angle_error = relative_pose_error(prev.T_gt, viewpoint.T_gt, prev.T, viewpoint.T)
+            print(f"iter = {tracking_itr}, loss = {loss_tracking_scalar.item():.4f}, l2 loss = {l2_loss.item():.4f}, trans error = {trans_error.item()}, angle error = {angle_error.item()}")
 
             loss_tracking = torch.norm(loss_tracking_img.flatten(), p=self.pnorm)
 
@@ -1014,7 +1043,7 @@ class FrontEnd(mp.Process):
 
             pose_optimizer.step()
 
-            # update_pose(viewpoint)
+            update_pose(viewpoint)
 
         if self.use_best_loss:
             print("Using best loss")
@@ -1024,14 +1053,202 @@ class FrontEnd(mp.Process):
         viewpoint.cam_trans_delta.data.fill_(0)
         viewpoint.cam_rot_delta.data.fill_(0)
 
-        repeat_second_order = True
+        check_sketch = True
+        repeat_second_order = False
         exp_first_order = False
 
+        if check_sketch:
+            prev_avg_SJ = None
+            height, width = viewpoint.image_height, viewpoint.image_width
+            tau_len = viewpoint.cam_trans_delta.shape[0] + viewpoint.cam_rot_delta.shape[0]
+            exposure_len = viewpoint.exposure_a.shape[0] + viewpoint.exposure_b.shape[0]
+            m = height * width
+            n = tau_len + exposure_len
+            d = int(sketch_aspect * n)
 
-        if repeat_second_order:
+            data = [[] for _ in range(stack_aspect)]
+            means = [[] for _ in range(stack_aspect)]
+            ci_lower_bounds = [[] for _ in range(stack_aspect)]
+            ci_upper_bounds = [[] for _ in range(stack_aspect)]
+            num_trials = 1000
+            confidence = 0.95
+
+            orig_viewpoint = TempCamera(viewpoint)
+
+            for i in range(num_trials):
+
+                # Reset viewpoint
+                orig_viewpoint.assign(viewpoint)
+                new_viewpoint_params = None
+                old_SJ = None
+                old_Sf = None
+                gen_random = True
+
+                for j in range(stack_aspect):
+
+                    # If in second order and new_viewpoint_params is not None
+                    # Then cache the old data
+                    if new_viewpoint_params is not None:
+                        old_loss_scalar = loss_tracking_scalar
+                        old_output = (TempCamera(viewpoint), render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, )
+                        new_viewpoint_params.assign(viewpoint)
+                        update_pose(viewpoint)
+
+                    if gen_random:
+                        gen_random = True
+                        sketch_mode = 1
+                        height, width = viewpoint.image_height, viewpoint.image_width
+                        tau_len = viewpoint.cam_trans_delta.shape[0] + viewpoint.cam_rot_delta.shape[0]
+                        exposure_len = viewpoint.exposure_a.shape[0] + viewpoint.exposure_b.shape[0]
+                        n = tau_len + exposure_len
+                        m = height * width
+                        d = int(sketch_aspect * n)
+
+                        # First permute the flattened indices and split them into d parts
+                        # Each part must be equal in size so we can stack them into a tensor
+                        chunk_size = m // d
+                        rand_flat_indices = torch.randperm(m, device=self.device, dtype=torch.int32)
+                        rand_indices_row = rand_flat_indices // width
+                        rand_indices_col = rand_flat_indices % width
+                        rand_indices_row = rand_indices_row.reshape((d, -1))
+                        rand_indices_col = rand_indices_col.reshape((d, -1))
+                        rand_indices = (rand_indices_row, rand_indices_col)
+                        rand_weights = torch.randint(0, 2, size=(height, width), device=self.device, dtype=torch.float32) * 2 - 1
+
+                        sketch_indices = torch.ones((height, width), device=self.device, dtype=torch.int32) * (-1)
+
+                        i_values = torch.arange(d, device=self.device, dtype=torch.int32).view(-1, 1).expand(-1, chunk_size)
+
+                        sketch_indices[rand_indices_row, rand_indices_col] = i_values
+
+                        # This is used to pass into forward functions so we can recover the grad
+                        sketch_dtau = torch.empty((d, tau_len), device=self.device, dtype=torch.float32, requires_grad=True)
+                        sketch_dexposure = torch.empty((d, exposure_len), device=self.device, dtype=torch.float32, requires_grad=True)
+
+                        forward_sketch_args = {"sketch_mode": sketch_mode, "sketch_dim": d, "sketch_indices": sketch_indices, "rand_indices": rand_indices, "sketch_dtau": sketch_dtau, "sketch_dexposure": sketch_dexposure, }
+
+
+                    render_pkg = render(
+                        viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
+                    )
+
+                    image, depth, opacity = (
+                        render_pkg["render"],
+                        render_pkg["depth"],
+                        render_pkg["opacity"],
+                    )
+
+                    loss_tracking_img = get_loss_tracking_per_pixel(
+                        self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
+                    )
+
+                    loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=1)
+
+                    is_new_step = True
+                    second_to_first = False
+                    if new_viewpoint_params is not None:
+                        # DEBUG
+                        is_new_step = False
+                        # DEBUG END
+
+                    if not is_new_step:
+                        # DEBUG
+                        old_viewpoint_params, _, _, _, _, _, _, = old_output
+                        # DEBUG END
+                        # old_viewpoint_params, _, _, _, _, _, , = old_output
+                        old_viewpoint_params.assign(viewpoint)
+                        loss_tracking_scalar = old_loss_scalar
+                        old_SJ = SJ
+                        old_Sf = Sf
+
+                        # We need to run rendering again to align with the new random indices
+                        render_pkg = render(
+                            viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
+                        )
+                        image, depth, opacity = (
+                            render_pkg["render"],
+                            render_pkg["depth"],
+                            render_pkg["opacity"],
+                        )
+                        loss_tracking_img = get_loss_tracking_per_pixel(
+                            self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
+                        )
+
+                    if torch.isnan(loss_tracking_img).any():
+                        raise ValueError("Loss tracking image has nan values")
+
+                    loss_tracking_img1 = torch.sum(loss_tracking_img * rand_weights, dim=0)
+
+                    Sf = torch.sum(loss_tracking_img1[rand_indices_row, rand_indices_col], dim=1) / chunk_size
+                    Sf0 = Sf[0]
+                    phi = torch.sum(loss_tracking_img1) / (m / d)
+                    
+                    pose_optimizer.zero_grad()
+
+                    # DEBUG
+                    # Manually zero out the gradients for now
+                    forward_sketch_args["sketch_dtau"].grad = None
+                    forward_sketch_args["sketch_dexposure"].grad = None
+                    # print(f"SJ = {forward_sketch_args['sketch_dtau'].grad} {forward_sketch_args['sketch_dexposure'].grad}")
+                    # DEBUG END
+
+                    phi.backward(retain_graph=False)
+
+                    with torch.no_grad():
+
+                        SJ = torch.cat((forward_sketch_args["sketch_dtau"].grad, forward_sketch_args["sketch_dexposure"].grad), dim=1)
+
+                        raw_sigma_max = torch.linalg.matrix_norm(SJ, ord=2)
+
+                        if not is_new_step:
+                            # eta = 1
+                            SJ = torch.cat((SJ, old_SJ), dim=0)
+                            Sf = torch.cat((Sf, old_Sf), dim=0)
+                            assert(SJ.shape[0] % d == 0)
+                            eta = SJ.shape[0] // d
+                        else:
+                            eta = 1
+
+                        print(f"eta = {eta}")
+
+                        damped_SJ = torch.cat((SJ / math.sqrt(eta), torch.eye(n, device=self.device) * math.sqrt(lambda_)), dim=0)
+                        damped_Sf = torch.cat((Sf / math.sqrt(eta), torch.zeros(n, device=self.device)), dim=0)
+                        x = torch.linalg.lstsq(damped_SJ, -damped_Sf).solution
+
+                        new_viewpoint_params = TempCamera(viewpoint)
+                        new_viewpoint_params.step(x)
+                        second_order_converged = x.norm() < second_order_converged_threshold
+
+                        sigma_max = torch.linalg.matrix_norm(damped_SJ, ord=2)
+
+                    data[j].append(sigma_max.item())
+                    # data[j].append(x.norm().item())
+                    # data[j].append(damped_Sf.norm().item())
+                    mean = np.mean(data[j])
+                    std_err = stats.sem(data[j])
+                    t_value = stats.t.ppf((1 + confidence) / 2, num_trials - 1)
+                    margin_of_error = t_value * std_err
+                    ci_lower_bound = mean - margin_of_error
+                    ci_upper_bound = mean + margin_of_error
+                    means[j].append(mean)
+                    ci_lower_bounds[j].append(ci_lower_bound)
+                    ci_upper_bounds[j].append(ci_upper_bound)
+
+                    print(f"trial = {i}, j = {j}, sigma_max = {sigma_max:.4f}, mean = {mean:.4f}, ci = ({ci_lower_bound:.4f}, {ci_upper_bound:.4f}), damped_SJ.shape = {damped_SJ.shape}, lambda = {lambda_:.4f}, raw_sigma_max = {raw_sigma_max:.4f}")
+
+
+
+        elif repeat_second_order:
             cached_forward_sketch_args = None
 
-            for tracking_itr in range(5):
+            image_gt = viewpoint.original_image.cuda()
+            image_np = image_gt.permute(1, 2, 0)
+            image_np = image_np.detach().cpu().numpy()
+            image_np = (image_np * 255).astype(np.uint8)
+            image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(f"outputs/images/frame-{cur_frame_idx}/frame-{cur_frame_idx}_gt.png", image_np)
+
+            for tracking_itr in range(10):
                 if cached_forward_sketch_args is None:
                     # Set up sketching in the forward pass
                     sketch_mode = 1
@@ -1081,11 +1298,15 @@ class FrontEnd(mp.Process):
                 loss_tracking_img = get_loss_tracking_per_pixel(
                     self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
                 )
+                
+                loss_tracking_img = HuberLoss.apply(loss_tracking_img, 0.1)
 
                 loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=1)
                 l2_loss = torch.norm(loss_tracking_img.flatten(), p=2)
-                trans_error = (viewpoint.T - viewpoint.T_gt).norm()
-                print(f"iter = {tracking_itr}, loss = {loss_tracking_scalar.item():.4f}, l2 loss = {l2_loss.item():.4f} trans error = {trans_error.item():.4f}")
+                trans_error, angle_error = pose_diff(viewpoint.T, viewpoint.T_gt)
+                exp_a = viewpoint.exposure_a.item()
+                exp_b = viewpoint.exposure_b.item()
+                print(f"iter = {tracking_itr}, loss = {loss_tracking_scalar.item():.4f}, l2 loss = {l2_loss.item():.4f}, trans error = {trans_error.item():.4f}, angle error = {angle_error.item():.4f}")
 
                 loss_tracking_img1 = torch.sum(loss_tracking_img * rand_weights, dim=0)
 
@@ -1142,14 +1363,16 @@ class FrontEnd(mp.Process):
                     render_pkg["opacity"],
                 )
 
+
                 loss_tracking_img = get_loss_tracking_per_pixel(
                     self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
                 )
+                loss_tracking_img = HuberLoss.apply(loss_tracking_img, 0.1)
 
                 loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=1)
                 l2_loss = torch.norm(loss_tracking_img.flatten(), p=2)
-                trans_error = (viewpoint.T - viewpoint.T_gt).norm()
-                print(f"lambda = {lambda_}, loss = {loss_tracking_scalar.item()}, l2_loss = {l2_loss.item()}, trans error = {trans_error.item()}")
+                trans_error, angle_error = pose_diff(viewpoint.T, viewpoint.T_gt)
+                print(f"lambda = {lambda_}, loss = {loss_tracking_scalar.item()}, l2_loss = {l2_loss.item()}, trans error = {trans_error.item()}, angle error = {angle_error.item()}")
 
                 loss_tracking_img1 = torch.sum(loss_tracking_img * rand_weights, dim=0)
 
@@ -1168,6 +1391,19 @@ class FrontEnd(mp.Process):
                     lambda_ = lambda_ / 2
                 elif rho < 0:
                     lambda_ = lambda_ * 10
+
+                # save image
+                image_np = image.permute(1, 2, 0)
+                image_np = image_np.detach().cpu().numpy()
+                image_np = (image_np * 255).astype(np.uint8)
+                image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+
+                cv2.imwrite(f"outputs/images/frame-{cur_frame_idx}/frame-{cur_frame_idx}_iter-{tracking_itr}_loss-{loss_tracking_scalar.item()}_trans-error-{trans_error.item()}_angle-error-{angle_error.item()}.png", image_np)
+                # save opacity.
+                opacity_np = opacity.detach().cpu().numpy().squeeze(0)
+                opacity_np = (opacity_np * 255).astype(np.uint8)
+                cv2.imwrite(f"outputs/images/frame-{cur_frame_idx}/frame-{cur_frame_idx}_iter-{tracking_itr}_opacity.png", opacity_np)
+
 
                 print("\n\n")
 
@@ -1655,13 +1891,24 @@ class FrontEnd(mp.Process):
                     )
                 else:
                     self.cleanup(cur_frame_idx)
+
+                # DEBUG
+                if create_kf:
+                    self.last_kf_idx = cur_frame_idx
+                # DEBUG END
+
                 cur_frame_idx += 1
+
+                # DEBUG
+                save_trj_kf_intv = self.save_trj_kf_intv
+                save_trj_kf_intv = 1
+                # print(f"len self.kf_indices = {len(self.kf_indices)}")
 
                 if (
                     self.save_results
                     and self.save_trj
                     and create_kf
-                    and len(self.kf_indices) % self.save_trj_kf_intv == 0
+                    and len(self.kf_indices) % save_trj_kf_intv == 0
                 ):
                     Log("Evaluating ATE at frame: ", cur_frame_idx)
                     eval_ate(

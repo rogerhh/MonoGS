@@ -27,6 +27,8 @@ class SLAM:
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
 
+        torch.random.manual_seed(0)
+
 
         self.config = config
         self.save_dir = save_dir

@@ -97,6 +97,31 @@ def update_pose(camera, converged_threshold=1e-4):
     
     return converged
 
+def relative_pose_error(P1_gt, P2_gt, P1, P2):
+    dP_gt = P1_gt.inverse() @ P2_gt
+    dP = P1.inverse() @ P2
+
+    return pose_diff(dP_gt, dP)
+
+
+def pose_diff(P1, P2):
+    T1, T2 = P1[:3, 3], P2[:3, 3]
+    trans_diff = torch.norm(T1 - T2)
+
+    R1, R2 = P1[:3, :3], P2[:3, :3]
+    dR = R1 @ R2.transpose(0, 1)
+
+    tr = dR.trace()
+    cos_theta = (tr - 1.0) / 2.0
+    cos_theta = torch.clamp(cos_theta, -1.0, 1.0)
+    angle = torch.acos(cos_theta)
+
+    return trans_diff, angle
+    
+
+def trans_diff(T1, T2):
+    return torch.norm(T1[:3, 3] - T2[:3, 3])
+
 def angle_diff(R1, R2):
     R = R1.float() @ R2.float().transpose(0, 1)
     tr = R.trace()
