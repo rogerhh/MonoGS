@@ -135,7 +135,9 @@ class FrontEnd(mp.Process):
         self.pnorm = self.config["Training"]["RGN"]["pnorm"]
         self.use_huber = self.config["Training"]["RGN"]["use_huber"]
         self.huber_delta = self.config["Training"]["RGN"]["huber_delta"]
-        self.sketch_aspect = self.config["Training"]["RGN"]["second_order"]["sketch_aspect"]
+        self.repeat_dim = self.config["Training"]["RGN"]["second_order"]["repeat_dim"]
+        self.stack_dim = self.config["Training"]["RGN"]["second_order"]["stack_dim"]
+        self.sketch_dim = self.config["Training"]["RGN"]["second_order"]["sketch_dim"]
         self.initial_lambda = self.config["Training"]["RGN"]["second_order"]["initial_lambda"]
         self.max_lambda = self.config["Training"]["RGN"]["second_order"]["max_lambda"]
         self.min_lambda = self.config["Training"]["RGN"]["second_order"]["min_lambda"]
@@ -178,7 +180,6 @@ class FrontEnd(mp.Process):
         self.second_order_time_sum = 0
         self.second_order_forward_sum = 0
         self.second_order_gen_random_sum = 0
-        self.second_order_setup_sum = 0
         self.second_order_backward_sum = 0
         self.second_order_ls_solve_sum = 0
         self.second_order_update_sum = 0
@@ -276,32 +277,65 @@ class FrontEnd(mp.Process):
         self.request_init(cur_frame_idx, viewpoint, depth_map)
         self.reset = False
 
-    def gen_forward_sketch_args(self, height, width, tau_len, exposure_len, d):
+    def gen_default_forward_sketch_args(self):
+        forward_sketch_args = {"sketch_mode": 0, 
+                               "repeat_dim": 0,
+                               "stack_dim": 0,
+                               "sketch_dim": 0, 
+                               "sketch_indices": None, 
+                               "rand_indices": None, 
+                               "sketch_dtau": None, 
+                               "sketch_dexposure": None, 
+                               "chunk_size": None, 
+                               "rand_weights": None, 
+                               "rand_indices_row": None, 
+                               "rand_indices_col": None, }
+        return forward_sketch_args
+
+    def gen_forward_sketch_args(self, height, width, tau_len, exposure_len, repeat_dim, stack_dim, sketch_dim):
+
         n = tau_len + exposure_len
         m = height * width
+        d = stack_dim * sketch_dim
 
-        # First permute the flattened indices and split them into d parts
-        # Each part must be equal in size so we can stack them into a tensor
         chunk_size = m // d
-        rand_flat_indices = torch.randperm(m, device=self.device, dtype=torch.int32)
+        rand_flat_indices = torch.empty((repeat_dim, chunk_size*d), dtype=torch.int32, device=self.device)
+
+        for i in range(repeat_dim):
+            rand_flat_indices[i] = torch.randperm(m, dtype=torch.int32, device=self.device)[:(chunk_size*d)]
+         
+        rand_flat_indices = rand_flat_indices.reshape((repeat_dim, stack_dim, sketch_dim, -1))
+
         rand_indices_row = rand_flat_indices // width
         rand_indices_col = rand_flat_indices % width
-        rand_indices_row = rand_indices_row.reshape((d, -1))
-        rand_indices_col = rand_indices_col.reshape((d, -1))
         rand_indices = (rand_indices_row, rand_indices_col)
-        rand_weights = torch.randint(0, 2, size=(height, width), device=self.device, dtype=torch.float32) * 2 - 1
 
-        sketch_indices = torch.ones((height, width), device=self.device, dtype=torch.int32) * (-1)
 
-        i_values = torch.arange(d, device=self.device, dtype=torch.int32).view(-1, 1).expand(-1, chunk_size)
+        sketch_indices = torch.ones((repeat_dim, stack_dim, height, width), dtype=torch.int32, device=self.device) * (-1)
 
-        sketch_indices[rand_indices_row, rand_indices_col] = i_values
+        i_values = torch.arange(sketch_dim, dtype=torch.int32, device=self.device).view(1, 1, -1, 1)
 
-        # This is used to pass into forward functions so we can recover the grad
-        sketch_dtau = torch.empty((d, tau_len), device=self.device, dtype=torch.float32, requires_grad=True)
-        sketch_dexposure = torch.empty((d, exposure_len), device=self.device, dtype=torch.float32, requires_grad=True)
+        sketch_indices[torch.arange(repeat_dim).view(-1, 1, 1, 1), 
+                       torch.arange(stack_dim).view(1, -1, 1, 1),
+                       rand_indices_row, rand_indices_col] = i_values
 
-        forward_sketch_args = {"sketch_mode": 1, "sketch_dim": d, "sketch_indices": sketch_indices, "rand_indices": rand_indices, "sketch_dtau": sketch_dtau, "sketch_dexposure": sketch_dexposure, "chunk_size": chunk_size, "rand_weights": rand_weights, "rand_indices_row": rand_indices_row, "rand_indices_col": rand_indices_col, }
+        rand_weights = torch.randint(0, 2, size=(repeat_dim, height, width), dtype=torch.float32, device=self.device) * 2 - 1
+
+        sketch_dtau = torch.empty((stack_dim, sketch_dim, tau_len), dtype=torch.float32, device=self.device, requires_grad=True)
+        sketch_dexposure = torch.empty((stack_dim, sketch_dim, exposure_len), dtype=torch.float32, device=self.device, requires_grad=True)
+
+        forward_sketch_args = {"sketch_mode": 1,
+                               "repeat_dim": repeat_dim,
+                               "stack_dim": stack_dim,
+                               "sketch_dim": sketch_dim,
+                               "sketch_indices": sketch_indices,
+                               "rand_indices": rand_indices,
+                               "sketch_dtau": sketch_dtau,
+                               "sketch_dexposure": sketch_dexposure,
+                               "chunk_size": chunk_size,
+                               "rand_weights": rand_weights,
+                               "rand_indices_row": rand_indices_row,
+                               "rand_indices_col": rand_indices_col, }
         return forward_sketch_args
 
     def tracking(self, cur_frame_idx, viewpoint):
@@ -363,7 +397,9 @@ class FrontEnd(mp.Process):
         first_order_num_pixels = self.first_order_num_pixels
         second_order_max_iter = self.second_order_max_iter
         second_order_num_backward_gaussians = self.second_order_num_backward_gaussians
-        sketch_aspect = self.sketch_aspect
+        repeat_dim = self.repeat_dim
+        stack_dim = self.stack_dim
+        sketch_dim = self.sketch_dim
         initial_lambda = self.initial_lambda
         max_lambda = self.max_lambda
         min_lambda = self.min_lambda
@@ -400,15 +436,21 @@ class FrontEnd(mp.Process):
 
         last_kf = self.cameras[self.last_kf_idx]
 
-        covar = torch.eye(8, device=self.device, dtype=torch.float32, requires_grad=False)
-        covar[range(3, 6), range(3, 6)] = 0.3
+        # Some constants
+        height, width = viewpoint.image_height, viewpoint.image_width
+        tau_len = viewpoint.cam_trans_delta.shape[0] + viewpoint.cam_rot_delta.shape[0]
+        exposure_len = viewpoint.exposure_a.shape[0] + viewpoint.exposure_b.shape[0]
+        m = height * width
+        n = tau_len + exposure_len
+        d = stack_dim * sketch_dim
 
-        forward_sketch_args = {"sketch_mode": 0, "sketch_dim": 0, "sketch_indices": None, "rand_indices": None, "sketch_dtau": None, "sketch_dexposure": None, }
+        forward_sketch_args = self.gen_default_forward_sketch_args()
 
         profile_data = {"timestamps": [], "losses": [], "pose": None, "rasterize_gaussians_backward_time_ms": [], "rasterize_gaussians_C_backward_time_ms": []}
 
         tracking_start = time.time()
         pose_optimizer = torch.optim.Adam(opt_params)
+
         for tracking_itr in range(max_iter):
             tracking_iter_start = time.time()
 
@@ -437,51 +479,14 @@ class FrontEnd(mp.Process):
             # Set up sketching in the forward pass
             if in_second_order:
                 second_order_random_gen_start = time.time()
-                sketch_mode = 1
-                height, width = viewpoint.image_height, viewpoint.image_width
-                tau_len = viewpoint.cam_trans_delta.shape[0] + viewpoint.cam_rot_delta.shape[0]
-                exposure_len = viewpoint.exposure_a.shape[0] + viewpoint.exposure_b.shape[0]
-                n = tau_len + exposure_len
-                m = height * width
-                d = int(sketch_aspect * n)
-
-                # First permute the flattened indices and split them into d parts
-                # Each part must be equal in size so we can stack them into a tensor
-                chunk_size = m // d
-                rand_flat_indices = torch.randperm(m, device=self.device, dtype=torch.int32)
-                rand_indices_row = rand_flat_indices // width
-                rand_indices_col = rand_flat_indices % width
-                rand_indices_row = rand_indices_row.reshape((d, -1))
-                rand_indices_col = rand_indices_col.reshape((d, -1))
-                rand_indices = (rand_indices_row, rand_indices_col)
-                rand_weights = torch.randint(0, 2, size=(height, width), device=self.device, dtype=torch.float32) * 2 - 1
-
-                sketch_indices = torch.ones((height, width), device=self.device, dtype=torch.int32) * (-1)
-
-                second_order_random_gen1_end = time.time()
-                i_values = torch.arange(d, device=self.device, dtype=torch.int32).view(-1, 1).expand(-1, chunk_size)
-
-                sketch_indices[rand_indices_row, rand_indices_col] = i_values
-
-                # for i in range(d):
-                #     sketch_indices[rand_indices_row[i], rand_indices_col[i]] = i
-
-                # This is used to pass into forward functions so we can recover the grad
-                sketch_dtau = torch.empty((d, tau_len), device=self.device, dtype=torch.float32, requires_grad=True)
-                sketch_dexposure = torch.empty((d, exposure_len), device=self.device, dtype=torch.float32, requires_grad=True)
-
-                forward_sketch_args = {"sketch_mode": sketch_mode, "sketch_dim": d, "sketch_indices": sketch_indices, "rand_indices": rand_indices, "sketch_dtau": sketch_dtau, "sketch_dexposure": sketch_dexposure, }
+                forward_sketch_args = self.gen_forward_sketch_args(height, width, tau_len, exposure_len, repeat_dim, stack_dim, sketch_dim)
                 second_order_random_gen_end = time.time()
-
 
             if tracking_itr >= first_order_fast_iter:
                 first_order_num_backward_gaussians = -1
 
-            num_backward_gaussians = first_order_num_backward_gaussians if not in_second_order else second_order_num_backward_gaussians
-            num_backward_gaussians = -1 if num_backward_gaussians <= 0 else num_backward_gaussians
-
             render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=num_backward_gaussians, forward_sketch_args=forward_sketch_args,
+                viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
             )
 
             render_end = time.time()
@@ -546,7 +551,7 @@ class FrontEnd(mp.Process):
 
                 # We need to run rendering again to align with the new random indices
                 render_pkg = render(
-                    viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=num_backward_gaussians, forward_sketch_args=forward_sketch_args,
+                    viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
                 )
                 image, depth, opacity = (
                     render_pkg["render"],
@@ -632,61 +637,45 @@ class FrontEnd(mp.Process):
 
             else:
 
-                if torch.isnan(loss_tracking_img).any():
-                    raise ValueError("Loss tracking image has nan values")
+                sketch_dim_per_iter = stack_dim * sketch_dim
+                loss_tracking_img = loss_tracking_img.sum(dim=0) / (m / sketch_dim_per_iter)
 
-                second_order_setup_start = time.time()
+                rand_weights = forward_sketch_args["rand_weights"]
+                rand_indices_row = forward_sketch_args["rand_indices_row"]
+                rand_indices_col = forward_sketch_args["rand_indices_col"]
 
-                loss_tracking_img1 = torch.sum(loss_tracking_img * rand_weights, dim=0)
+                weighted_loss_tracking_img = loss_tracking_img * rand_weights
+                SJ = torch.empty((repeat_dim, stack_dim, sketch_dim, n), device=self.device)
+                batch_indices = torch.arange(repeat_dim).view(-1, 1, 1, 1)
+                Sf = weighted_loss_tracking_img[batch_indices, rand_indices_row, rand_indices_col].sum(dim=-1)
 
-                if self.pnorm == 2:
-                    pass
-                elif self.pnorm == 1:
-                    # Convert to L1 norm
-                    loss_tracking_img1 = loss_tracking_img1 / (torch.sqrt(torch.abs(loss_tracking_img1)) + 1e-8)
-                    print(loss_tracking_img1)
-                    print(torch.isnan(loss_tracking_img1).any())
+                second_order_backward_start = time.time()
 
-                Sf = torch.sum(loss_tracking_img1[rand_indices_row, rand_indices_col], dim=1) / chunk_size
-                Sf0 = Sf[0]
-                phi = torch.sum(loss_tracking_img1) / (m / d)
+                for i in range(repeat_dim):
 
-                # torch.cuda.synchronize()
-                second_order_setup_end = time.time()
-                
-                pose_optimizer.zero_grad()
+                    viewpoint.cam_rot_delta.grad = None
+                    viewpoint.cam_trans_delta.grad = None
+                    viewpoint.exposure_a.grad = None
+                    viewpoint.exposure_b.grad = None
+                    forward_sketch_args["sketch_dtau"].grad = None
+                    forward_sketch_args["sketch_dexposure"].grad = None
 
-                # DEBUG
-                # Manually zero out the gradients for now
-                forward_sketch_args["sketch_dtau"].grad = None
-                forward_sketch_args["sketch_dexposure"].grad = None
-                # print(f"SJ = {forward_sketch_args['sketch_dtau'].grad} {forward_sketch_args['sketch_dexposure'].grad}")
-                # DEBUG END
+                    weighted_loss_tracking_img[i].backward(gradient=torch.ones_like(weighted_loss_tracking_img[i]), retain_graph=True)
 
-                phi.backward(retain_graph=False)
-
-                # torch.cuda.synchronize()
-                second_order_backward_end = time.time()
+                    SJ_i = torch.cat((forward_sketch_args["sketch_dtau"].grad, forward_sketch_args["sketch_dexposure"].grad), dim=2)
+                    SJ[i] = SJ_i
 
                 with torch.no_grad():
-                    # torch.cuda.synchronize()
+                    SJ = SJ.reshape((-1, n))
+                    Sf = Sf.flatten()
+
+                    damped_SJ = torch.cat((SJ, torch.eye(n, device=self.device) * math.sqrt(lambda_)), dim=0)
+                    damped_Sf = torch.cat((Sf, torch.zeros(n, device=self.device)), dim=0)
+
+                    second_order_backward_end = time.time()
                     second_order_ls_solve_start = time.time()
 
-                    SJ = torch.cat((forward_sketch_args["sketch_dtau"].grad, forward_sketch_args["sketch_dexposure"].grad), dim=1)
-
-                    if not is_new_step:
-                        # eta = 1
-                        SJ = torch.cat((SJ, old_SJ), dim=0)
-                        Sf = torch.cat((Sf, old_Sf), dim=0)
-                        assert(SJ.shape[0] % d == 0)
-                        eta = SJ.shape[0] // d
-                    else:
-                        eta = 1
-
-                    damped_SJ = torch.cat((SJ / math.sqrt(eta), torch.eye(n, device=self.device) * math.sqrt(lambda_)), dim=0)
-                    damped_Sf = torch.cat((Sf / math.sqrt(eta), torch.zeros(n, device=self.device)), dim=0)
-
-                    x = torch.linalg.lstsq(damped_SJ / math.sqrt(eta), -damped_Sf / math.sqrt(eta)).solution
+                    x = torch.linalg.lstsq(damped_SJ, -damped_Sf).solution
 
                     # H = SJ.T @ SJ / eta
                     # g = SJ.T @ Sf / eta
@@ -706,23 +695,6 @@ class FrontEnd(mp.Process):
                     new_viewpoint_params.step(x)
                     second_order_converged = x.norm() < second_order_converged_threshold
 
-                    render_pkg = render(
-                        viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
-                    )
-                    image, depth, opacity = (
-                        render_pkg["render"],
-                        render_pkg["depth"],
-                        render_pkg["opacity"],
-                    )
-
-                    loss_tracking_img = get_loss_tracking_per_pixel(
-                        self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
-                    )
-                    if self.use_huber:
-                        loss_tracking_img = HuberLoss.apply(loss_tracking_img, self.huber_delta)
-
-                    loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=1)
-
                     second_order_update_end = time.time()
 
                     if print_output:
@@ -738,7 +710,6 @@ class FrontEnd(mp.Process):
                 # print(f"Forward time ms: {(forward_end - tracking_iter_start) * 1000}")
                 # print(f"Second order random gen1 time ms: {(second_order_random_gen1_end - tracking_iter_start) * 1000}")
                 # print(f"Second order random gen time ms: {(second_order_random_gen_end - tracking_iter_start) * 1000}")
-                # print(f"Second order setup time ms: {(second_order_setup_end - second_order_setup_start) * 1000}")
                 # print(f"Second order backward time ms: {(second_order_backward_end - second_order_setup_end) * 1000}")
                 # print(f"Second order ls solve time ms: {(second_order_ls_solve_end - second_order_ls_solve_start) * 1000}")
                 # print(f"Second order solve time ms: {(second_order_solve_end - second_order_backward_end) * 1000}")
@@ -751,8 +722,7 @@ class FrontEnd(mp.Process):
                 self.second_order_time_sum += tracking_itr_end - tracking_iter_start
                 self.second_order_forward_sum += forward_end - tracking_iter_start
                 self.second_order_gen_random_sum += second_order_random_gen_end - second_order_random_gen_start
-                self.second_order_setup_sum += second_order_setup_end - second_order_setup_start
-                self.second_order_backward_sum += second_order_backward_end - second_order_setup_end
+                self.second_order_backward_sum += second_order_backward_end - second_order_backward_start
                 self.second_order_ls_solve_sum += second_order_ls_solve_end - second_order_ls_solve_start
                 self.second_order_update_sum += second_order_update_end - second_order_ls_solve_end
                 self.second_order_count += 1
@@ -883,13 +853,11 @@ class FrontEnd(mp.Process):
                 avg_second_order_time = self.second_order_time_sum / self.second_order_count
                 avg_second_order_forward = self.second_order_forward_sum / self.second_order_count
                 avg_second_order_gen_random = self.second_order_gen_random_sum / self.second_order_count
-                avg_second_order_setup = self.second_order_setup_sum / self.second_order_count
                 avg_second_order_backward = self.second_order_backward_sum / self.second_order_count
                 avg_second_order_ls_solve = self.second_order_ls_solve_sum / self.second_order_count
                 avg_second_order_update = self.second_order_update_sum / self.second_order_count
                 print(f"Average second order forward time ms: {avg_second_order_forward * 1000}")
                 print(f"Average second order gen random time ms: {avg_second_order_gen_random * 1000}")
-                print(f"Average second order setup time ms: {avg_second_order_setup * 1000}")
                 print(f"Average second order backward time ms: {avg_second_order_backward * 1000}")
                 print(f"Average second order ls solve time ms: {avg_second_order_ls_solve * 1000}")
                 print(f"Average second order update time ms: {avg_second_order_update * 1000}")
@@ -902,7 +870,6 @@ class FrontEnd(mp.Process):
             self.first_order_count = 0
             self.second_order_forward_sum = 0
             self.second_order_gen_random_sum = 0
-            self.second_order_setup_sum = 0
             self.second_order_time_sum = 0
             self.second_order_backward_sum = 0
             self.second_order_ls_solve_sum = 0
@@ -983,9 +950,9 @@ class FrontEnd(mp.Process):
         first_order_num_pixels = self.first_order_num_pixels
         second_order_max_iter = self.second_order_max_iter
         second_order_num_backward_gaussians = self.second_order_num_backward_gaussians
-        # sketch_aspect = self.sketch_aspect
-        sketch_aspect = 4
-        stack_aspect = 4
+        repeat_dim = self.repeat_dim
+        stack_dim = self.stack_dim
+        sketch_dim = self.sketch_dim
         initial_lambda = self.initial_lambda
         max_lambda = self.max_lambda
         min_lambda = self.min_lambda
@@ -1005,7 +972,7 @@ class FrontEnd(mp.Process):
         best_loss_scalar = float("inf")
         best_viewpoint_params = None
 
-        forward_sketch_args = {"sketch_mode": 0, "sketch_dim": 0, "sketch_indices": None, "rand_indices": None, "sketch_dtau": None, "sketch_dexposure": None, "chunk_size": None, "rand_weights": None, }
+        default_forward_sketch_args = self.gen_default_forward_sketch_args()
 
         # warmup_iter = first_order_max_iter
         warmup_iter = 10
@@ -1014,7 +981,7 @@ class FrontEnd(mp.Process):
         pose_optimizer = torch.optim.Adam(opt_params)
         for tracking_itr in range(warmup_iter):
             render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
+                viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=default_forward_sketch_args,
             )
             image, depth, opacity = (
                 render_pkg["render"],
@@ -1023,7 +990,7 @@ class FrontEnd(mp.Process):
             )
 
             loss_tracking_img = get_loss_tracking_per_pixel(
-                self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
+                self.config, image, depth, opacity, viewpoint, forward_sketch_args=default_forward_sketch_args,
             )
             loss_tracking_img = HuberLoss.apply(loss_tracking_img, 0.1)
 
@@ -1053,11 +1020,106 @@ class FrontEnd(mp.Process):
         viewpoint.cam_trans_delta.data.fill_(0)
         viewpoint.cam_rot_delta.data.fill_(0)
 
-        check_sketch = True
+        check_grad = True
+        check_sketch = False
         repeat_second_order = False
         exp_first_order = False
 
-        if check_sketch:
+        if check_grad:
+            height, width = viewpoint.image_height, viewpoint.image_width
+            tau_len = viewpoint.cam_trans_delta.shape[0] + viewpoint.cam_rot_delta.shape[0]
+            exposure_len = viewpoint.exposure_a.shape[0] + viewpoint.exposure_b.shape[0]
+            m = height * width
+            n = tau_len + exposure_len
+            sketch_dim_per_iter = stack_dim * sketch_dim
+            d = repeat_dim * stack_dim * sketch_dim
+
+            # Do a default forward
+            default_render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=default_forward_sketch_args,
+            )
+
+            default_image, default_depth, default_opacity = (
+                default_render_pkg["render"],
+                default_render_pkg["depth"],
+                default_render_pkg["opacity"],
+            )
+
+            default_loss_tracking_img = get_loss_tracking_per_pixel(
+                self.config, default_image, default_depth, default_opacity, viewpoint, forward_sketch_args=default_forward_sketch_args,
+            )
+            default_loss_tracking_img = default_loss_tracking_img.sum(dim=0) / (m / sketch_dim_per_iter)
+
+            # Do a sketched forward
+            forward_sketch_args = self.gen_forward_sketch_args(height, width, tau_len, exposure_len, repeat_dim, stack_dim, sketch_dim)
+            chunk_size = forward_sketch_args["chunk_size"]
+
+            render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
+            )
+
+            image, depth, opacity = (
+                render_pkg["render"],
+                render_pkg["depth"],
+                render_pkg["opacity"],
+            )
+
+            loss_tracking_img = get_loss_tracking_per_pixel(
+                self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
+            )
+            loss_tracking_img = loss_tracking_img.sum(dim=0) / (m / sketch_dim_per_iter)
+
+            rand_weights = forward_sketch_args["rand_weights"]
+            rand_indices_row = forward_sketch_args["rand_indices_row"]
+            rand_indices_col = forward_sketch_args["rand_indices_col"]
+
+            weighted_loss_tracking_img = loss_tracking_img * rand_weights
+            SJ = torch.empty((repeat_dim, stack_dim, sketch_dim, n), device=self.device)
+            batch_indices = torch.arange(repeat_dim).view(-1, 1, 1, 1)
+            Sf = weighted_loss_tracking_img[batch_indices, rand_indices_row, rand_indices_col].sum(dim=-1)
+
+            for i in range(repeat_dim):
+                print(f"repeat_iter = {i}")
+
+                viewpoint.cam_rot_delta.grad = None
+                viewpoint.cam_trans_delta.grad = None
+                viewpoint.exposure_a.grad = None
+                viewpoint.exposure_b.grad = None
+                forward_sketch_args["sketch_dtau"].grad = None
+                forward_sketch_args["sketch_dexposure"].grad = None
+
+                pose_optimizer.zero_grad()
+
+                weighted_loss_tracking_img[i].backward(gradient=torch.ones_like(weighted_loss_tracking_img[i]), retain_graph=True)
+
+                SJ_i = torch.cat((forward_sketch_args["sketch_dtau"].grad, forward_sketch_args["sketch_dexposure"].grad), dim=2)
+                SJ[i] = SJ_i
+
+            weighted_default_loss_tracking_img = default_loss_tracking_img * rand_weights
+            default_Sf = weighted_default_loss_tracking_img[batch_indices, rand_indices_row, rand_indices_col].sum(dim=-1)
+
+            for i in range(repeat_dim):
+                for j in range(stack_dim):
+                    for k in range(sketch_dim):
+                        weighted_default_loss_tracking_img_ijk = default_Sf[i, j, k]
+
+                        viewpoint.cam_rot_delta.grad = None
+                        viewpoint.cam_trans_delta.grad = None
+                        viewpoint.exposure_a.grad = None
+                        viewpoint.exposure_b.grad = None
+
+                        pose_optimizer.zero_grad()
+
+                        weighted_default_loss_tracking_img_ijk.backward(retain_graph=True)
+
+                        correct_SJ_ijk = torch.cat((viewpoint.cam_trans_delta.grad, viewpoint.cam_rot_delta.grad, viewpoint.exposure_a.grad, viewpoint.exposure_b.grad), dim=0)
+
+
+            SJ = SJ.reshape((-1, n))
+            Sf = Sf.flatten()
+            import code; code.interact(local=locals())
+
+        elif check_sketch:
             prev_avg_SJ = None
             height, width = viewpoint.image_height, viewpoint.image_width
             tau_len = viewpoint.cam_trans_delta.shape[0] + viewpoint.cam_rot_delta.shape[0]
@@ -1066,10 +1128,10 @@ class FrontEnd(mp.Process):
             n = tau_len + exposure_len
             d = int(sketch_aspect * n)
 
-            data = [[] for _ in range(stack_aspect)]
-            means = [[] for _ in range(stack_aspect)]
-            ci_lower_bounds = [[] for _ in range(stack_aspect)]
-            ci_upper_bounds = [[] for _ in range(stack_aspect)]
+            data = [[] for _ in range(stack_dim)]
+            means = [[] for _ in range(stack_dim)]
+            ci_lower_bounds = [[] for _ in range(stack_dim)]
+            ci_upper_bounds = [[] for _ in range(stack_dim)]
             num_trials = 1000
             confidence = 0.95
 
@@ -1084,7 +1146,7 @@ class FrontEnd(mp.Process):
                 old_Sf = None
                 gen_random = True
 
-                for j in range(stack_aspect):
+                for j in range(stack_dim):
 
                     # If in second order and new_viewpoint_params is not None
                     # Then cache the old data
@@ -1129,7 +1191,7 @@ class FrontEnd(mp.Process):
 
 
                     render_pkg = render(
-                        viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
+                        viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
                     )
 
                     image, depth, opacity = (
@@ -1163,7 +1225,7 @@ class FrontEnd(mp.Process):
 
                         # We need to run rendering again to align with the new random indices
                         render_pkg = render(
-                            viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
+                            viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
                         )
                         image, depth, opacity = (
                             render_pkg["render"],
@@ -1177,13 +1239,8 @@ class FrontEnd(mp.Process):
                     if torch.isnan(loss_tracking_img).any():
                         raise ValueError("Loss tracking image has nan values")
 
-                    loss_tracking_img1 = torch.sum(loss_tracking_img * rand_weights, dim=0)
-
-                    Sf = torch.sum(loss_tracking_img1[rand_indices_row, rand_indices_col], dim=1) / chunk_size
-                    Sf0 = Sf[0]
-                    phi = torch.sum(loss_tracking_img1) / (m / d)
-                    
-                    pose_optimizer.zero_grad()
+                    # This is a somewhat arbitrary rescaling, but it works well with the lambdas
+                    loss_tracking_img = loss_tracking_img / (m / d)
 
                     # DEBUG
                     # Manually zero out the gradients for now
@@ -1192,7 +1249,9 @@ class FrontEnd(mp.Process):
                     # print(f"SJ = {forward_sketch_args['sketch_dtau'].grad} {forward_sketch_args['sketch_dexposure'].grad}")
                     # DEBUG END
 
-                    phi.backward(retain_graph=False)
+                    pose_optimizer.zero_grad()
+                    loss_tracking_img.backward(grad_tensor=torch.ones_like(loss_tracking_img))
+                    exit()
 
                     with torch.no_grad():
 
@@ -1287,7 +1346,7 @@ class FrontEnd(mp.Process):
 
                 # Then run 1 backward
                 render_pkg = render(
-                    viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
+                    viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
                 )
                 image, depth, opacity = (
                     render_pkg["render"],
@@ -1355,7 +1414,7 @@ class FrontEnd(mp.Process):
                 print(f"right after update viewpoint.T = {viewpoint.T}")
 
                 render_pkg = render(
-                    viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
+                    viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
                 )
                 image, depth, opacity = (
                     render_pkg["render"],
@@ -1449,7 +1508,7 @@ class FrontEnd(mp.Process):
 
             # Then run 1 backward
             render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
+                viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
             )
             image, depth, opacity = (
                 render_pkg["render"],
@@ -1508,7 +1567,7 @@ class FrontEnd(mp.Process):
                 update_pose(viewpoint)
 
                 render_pkg = render(
-                    viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
+                    viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
                 )
                 image, depth, opacity = (
                     render_pkg["render"],
@@ -1542,7 +1601,7 @@ class FrontEnd(mp.Process):
         else:
             # Then run 1 backward
             render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
+                viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
             )
             image, depth, opacity = (
                 render_pkg["render"],
@@ -1588,7 +1647,7 @@ class FrontEnd(mp.Process):
                 print(viewpoint.T)
 
                 render_pkg = render(
-                    viewpoint, self.gaussians, self.pipeline_params, self.background, num_backward_gaussians=-1, forward_sketch_args=forward_sketch_args,
+                    viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
                 )
                 image, depth, opacity = (
                     render_pkg["render"],
@@ -1901,7 +1960,7 @@ class FrontEnd(mp.Process):
 
                 # DEBUG
                 save_trj_kf_intv = self.save_trj_kf_intv
-                save_trj_kf_intv = 1
+                # save_trj_kf_intv = 1
                 # print(f"len self.kf_indices = {len(self.kf_indices)}")
 
                 if (

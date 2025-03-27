@@ -114,16 +114,18 @@ def get_loss_tracking_rgbd(
 
 class ApplyExposure(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, image, exposure_a, exposure_b, exposure_eps, sketch_mode=0, sketch_dim=0, rand_indices=None, sketch_dexposure=None):
+    def forward(ctx, image, exposure_a, exposure_b, exposure_eps, sketch_mode=0, sketch_dim=0, stack_dim=0, rand_indices=None, sketch_dexposure=None):
         ctx.sketch_mode = sketch_mode
         ctx.sketch_dim = sketch_dim
+        ctx.stack_dim = stack_dim
         rand_indices_row = None
         rand_indices_col = None
         if sketch_mode != 0:
             rand_indices_row = rand_indices[0]
             rand_indices_col = rand_indices[1]
+            ctx.repeat_iter = 0
 
-        ctx.save_for_backward(image, exposure_a, exposure_b, sketch_dexposure, rand_indices_row, rand_indices_col)
+        ctx.save_for_backward(image, exposure_a, exposure_b, sketch_dexposure, rand_indices_row, rand_indices_col, )
 
         return (torch.abs(exposure_a) + exposure_eps) * image + exposure_b
 
@@ -147,25 +149,37 @@ class ApplyExposure(torch.autograd.Function):
         grad_exposure_eps = None
         grad_sketch_mode = None
         grad_sketch_dim = None
+        grad_stack_dim = None
         grad_rand_indices = None
         grad_sketch_dexposure = None
 
         if ctx.sketch_mode != 0:
             sum_start = time.time()
             d = ctx.sketch_dim
+            stack_dim = ctx.stack_dim
             assert(sketch_dexposure is not None)
             grad_sketch_dexposure = torch.empty(sketch_dexposure.shape, device=grad_output.device)
 
-            grad_sketch_dexposure[:, 0] = grad_output_image[:, rand_indices_row, rand_indices_col].sum(dim=(0, 2))
-            grad_sketch_dexposure[:, 1] = grad_output[:, rand_indices_row, rand_indices_col].sum(dim=(0, 2))
+            grad_output_image_gray = grad_output_image.sum(dim=0)
+            grad_output_gray = grad_output.sum(dim=0)
+
+            temp_indices = torch.arange(3).view(-1, 1, 1, 1)
+
+            repeat_iter = ctx.repeat_iter
+            rand_indices_row_i = rand_indices_row[repeat_iter]
+            rand_indices_col_i = rand_indices_col[repeat_iter]
+
+            grad_sketch_dexposure[:, :, 0] = grad_output_image[temp_indices, rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
+            grad_sketch_dexposure[:, :, 1] = grad_output[temp_indices, rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
 
             sum_end = time.time()
-            # print(f"Sum time ms: {(sum_end - sum_start) * 1000}")
+
+            ctx.repeat_iter += 1
 
         apply_exposure_end = time.time()
         # print(f"ApplyExposure backward time ms: {(apply_exposure_end - apply_exposure_start) * 1000}")
 
-        return grad_image, grad_exposure_a, grad_exposure_b, grad_exposure_eps, grad_sketch_mode, grad_sketch_dim, grad_rand_indices, grad_sketch_dexposure
+        return grad_image, grad_exposure_a, grad_exposure_b, grad_exposure_eps, grad_sketch_mode, grad_sketch_dim, grad_stack_dim, grad_rand_indices, grad_sketch_dexposure
 
 
 def get_loss_tracking_per_pixel(config, image, depth, opacity, viewpoint, initialization=False, forward_sketch_args=None):
@@ -174,7 +188,7 @@ def get_loss_tracking_per_pixel(config, image, depth, opacity, viewpoint, initia
     if forward_sketch_args is None:
         image_ab = (torch.abs(viewpoint.exposure_a) + viewpoint.exposure_eps) * image + viewpoint.exposure_b
     else:
-        image_ab = ApplyExposure.apply(image, viewpoint.exposure_a, viewpoint.exposure_b, viewpoint.exposure_eps, forward_sketch_args["sketch_mode"], forward_sketch_args["sketch_dim"], forward_sketch_args["rand_indices"], forward_sketch_args["sketch_dexposure"])
+        image_ab = ApplyExposure.apply(image, viewpoint.exposure_a, viewpoint.exposure_b, viewpoint.exposure_eps, forward_sketch_args["sketch_mode"], forward_sketch_args["sketch_dim"], forward_sketch_args["stack_dim"], forward_sketch_args["rand_indices"], forward_sketch_args["sketch_dexposure"])
     # image_ab = (torch.abs(viewpoint.exposure_a) + viewpoint.exposure_eps) * image + viewpoint.exposure_b
     if config["Training"]["monocular"]:
         return get_loss_tracking_rgb_per_pixel(config, image_ab, depth, opacity, viewpoint)

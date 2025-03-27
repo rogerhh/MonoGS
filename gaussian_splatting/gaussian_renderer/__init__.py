@@ -116,11 +116,13 @@ def render(
 
     sketch_mode = 0
     sketch_dim = 0
+    stack_dim = 0
     sketch_dtau = None
     sketch_indices = None
     if forward_sketch_args is not None:
         sketch_mode = forward_sketch_args["sketch_mode"]
         sketch_dim = forward_sketch_args["sketch_dim"]
+        stack_dim = forward_sketch_args["stack_dim"]
         sketch_dtau = forward_sketch_args["sketch_dtau"]
         sketch_indices = forward_sketch_args["sketch_indices"]
 
@@ -140,6 +142,7 @@ def render(
             num_backward_gaussians=num_backward_gaussians,
             sketch_mode=sketch_mode,
             sketch_dim=sketch_dim,
+            stack_dim=stack_dim,
             sketch_dtau=sketch_dtau,
             sketch_indices=sketch_indices,
         )
@@ -158,6 +161,7 @@ def render(
             num_backward_gaussians=num_backward_gaussians,
             sketch_mode=sketch_mode,
             sketch_dim=sketch_dim,
+            stack_dim=stack_dim,
             sketch_dtau=sketch_dtau,
             sketch_indices=sketch_indices,
         )

@@ -13,4 +13,6 @@ cameras.json
 datasets
 wandb
 
+run.out*
+
 result*
