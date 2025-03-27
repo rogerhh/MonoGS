@@ -10,6 +10,7 @@ import lycon
 
 
 from gaussian_splatting.utils.graphics_utils import focal2fov
+from utils.configs import cuda_device
 
 try:
     import pyrealsense2 as rs
@@ -195,7 +196,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.args = args
         self.path = path
         self.config = config
-        self.device = "cuda:0"
+        self.device = cuda_device
         self.dtype = torch.float32
         self.num_imgs = 999999
 

@@ -13,6 +13,7 @@ from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
 from utils.slam_utils import get_loss_mapping
+from utils.configs import cuda_device
 
 
 class BackEnd(mp.Process):
@@ -29,7 +30,7 @@ class BackEnd(mp.Process):
         self.live_mode = False
 
         self.pause = False
-        self.device = "cuda"
+        self.device = cuda_device
         self.dtype = torch.float32
         self.monocular = config["Training"]["monocular"]
         self.iteration_count = 0
@@ -276,7 +277,7 @@ class BackEnd(mp.Process):
                                 self.gaussians.n_obs <= prune_coviz, mask
                             )
                         if to_prune is not None and self.monocular:
-                            self.gaussians.prune_points(to_prune.cuda())
+                            self.gaussians.prune_points(to_prune.to(self.device))
                             for idx in range((len(current_window))):
                                 current_idx = current_window[idx]
                                 self.occ_aware_visibility[current_idx] = (
@@ -350,7 +351,7 @@ class BackEnd(mp.Process):
                 render_pkg["radii"],
             )
 
-            gt_image = viewpoint_cam.original_image.cuda()
+            gt_image = viewpoint_cam.original_image.to(self.device)
             Ll1 = l1_loss(image, gt_image)
             loss = (1.0 - self.opt_params.lambda_dssim) * (
                 Ll1

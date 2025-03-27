@@ -20,6 +20,7 @@ from utils.logging_utils import Log
 from utils.multiprocessing_utils import FakeQueue
 from utils.slam_backend import BackEnd
 from utils.slam_frontend import FrontEnd
+from utils.configs import cuda_device
 
 
 class SLAM:
@@ -59,7 +60,7 @@ class SLAM:
 
         self.gaussians.training_setup(opt_params)
         bg_color = [0, 0, 0]
-        self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        self.background = torch.tensor(bg_color, dtype=torch.float32, device=cuda_device)
 
         frontend_queue = mp.Queue()
         backend_queue = mp.Queue()

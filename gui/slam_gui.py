@@ -27,6 +27,7 @@ from gui.gui_utils import (
 )
 from utils.camera_utils import Camera
 from utils.logging_utils import Log
+from utils.configs import cuda_device
 
 o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 
@@ -35,7 +36,7 @@ class SLAM_GUI:
     def __init__(self, params_gui=None):
         self.step = 0
         self.process_finished = False
-        self.device = "cuda"
+        self.device = cuda_device
 
         self.frustum_dict = {}
         self.model_dict = {}

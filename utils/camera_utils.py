@@ -4,6 +4,7 @@ from torch import nn
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2
 from utils.slam_utils import image_gradient, image_gradient_mask
 import torch.nn.functional as F
+from utils.configs import cuda_device
 
 
 class Camera(nn.Module):
@@ -22,7 +23,7 @@ class Camera(nn.Module):
         fovy,
         image_height,
         image_width,
-        device="cuda:0",
+        device=cuda_device,
     ):
         super(Camera, self).__init__()
         self.uid = uid
@@ -132,8 +133,8 @@ class Camera(nn.Module):
                 img_grad_intensity > median_img_grad_intensity * edge_threshold
             )
 
-        gt_image = self.original_image.cuda()
-        _, h, w = self.original_image.cuda().shape
+        gt_image = self.original_image.to(self.device)
+        _, h, w = gt_image.shape
         mask_shape = (1, h, w)
         rgb_boundary_threshold = config["Training"]["rgb_boundary_threshold"]
         rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(*mask_shape)

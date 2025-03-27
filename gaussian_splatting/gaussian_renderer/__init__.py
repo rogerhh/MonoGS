@@ -19,6 +19,7 @@ from diff_gaussian_rasterization import (
 
 from gaussian_splatting.scene.gaussian_model import GaussianModel
 from gaussian_splatting.utils.sh_utils import eval_sh
+from utils.configs import cuda_device
 
 
 def render(
@@ -44,7 +45,7 @@ def render(
 
     screenspace_points = (
         torch.zeros_like(
-            pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda"
+            pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device=cuda_device
         )
         + 0
     )

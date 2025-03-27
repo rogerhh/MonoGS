@@ -20,6 +20,7 @@ from gaussian_splatting.utils.image_utils import psnr
 from gaussian_splatting.utils.loss_utils import ssim
 from gaussian_splatting.utils.system_utils import mkdir_p
 from utils.logging_utils import Log
+from utils.configs import cuda_device
 
 
 def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
@@ -126,7 +127,7 @@ def eval_rendering(
     psnr_array, ssim_array, lpips_array = [], [], []
     cal_lpips = LearnedPerceptualImagePatchSimilarity(
         net_type="alex", normalize=True
-    ).to("cuda")
+    ).to(cuda_device)
     for idx in range(0, end_idx, interval):
         if idx in kf_indices:
             continue

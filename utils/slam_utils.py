@@ -1,16 +1,17 @@
 import torch
 import time
 import math
+from utils.configs import cuda_device
 
 
 def image_gradient(image):
     # Compute image gradient using Scharr Filter
     c = image.shape[0]
     conv_y = torch.tensor(
-        [[3, 0, -3], [10, 0, -10], [3, 0, -3]], dtype=torch.float32, device="cuda"
+        [[3, 0, -3], [10, 0, -10], [3, 0, -3]], dtype=torch.float32, device=cuda_device
     )
     conv_x = torch.tensor(
-        [[3, 10, 3], [0, 0, 0], [-3, -10, -3]], dtype=torch.float32, device="cuda"
+        [[3, 10, 3], [0, 0, 0], [-3, -10, -3]], dtype=torch.float32, device=cuda_device
     )
     normalizer = 1.0 / torch.abs(conv_y).sum()
     p_img = torch.nn.functional.pad(image, (1, 1, 1, 1), mode="reflect")[None]
@@ -26,8 +27,8 @@ def image_gradient(image):
 def image_gradient_mask(image, eps=0.01):
     # Compute image gradient mask
     c = image.shape[0]
-    conv_y = torch.ones((1, 1, 3, 3), dtype=torch.float32, device="cuda")
-    conv_x = torch.ones((1, 1, 3, 3), dtype=torch.float32, device="cuda")
+    conv_y = torch.ones((1, 1, 3, 3), dtype=torch.float32, device=cuda_device)
+    conv_x = torch.ones((1, 1, 3, 3), dtype=torch.float32, device=cuda_device)
     p_img = torch.nn.functional.pad(image, (1, 1, 1, 1), mode="reflect")[None]
     p_img = torch.abs(p_img) > eps
     img_grad_v = torch.nn.functional.conv2d(
@@ -89,7 +90,7 @@ def get_loss_tracking(config, image, depth, opacity, viewpoint, initialization=F
 
 
 def get_loss_tracking_rgb(config, image, depth, opacity, viewpoint):
-    gt_image = viewpoint.original_image.cuda()
+    gt_image = viewpoint.original_image.to(cuda_device)
     _, h, w = gt_image.shape
     mask_shape = (1, h, w)
     rgb_boundary_threshold = config["Training"]["rgb_boundary_threshold"]
@@ -196,7 +197,7 @@ def get_loss_tracking_per_pixel(config, image, depth, opacity, viewpoint, initia
 
 
 def get_loss_tracking_rgb_per_pixel(config, image, depth, opacity, viewpoint):
-    gt_image = viewpoint.original_image.cuda()
+    gt_image = viewpoint.original_image.to(cuda_device)
     l1 = opacity * (image * viewpoint.rgb_pixel_mask_mapping - 
                     gt_image * viewpoint.rgb_pixel_mask_mapping)
     return l1
@@ -230,7 +231,7 @@ def get_loss_mapping(config, image, depth, viewpoint, opacity, initialization=Fa
 
 
 def get_loss_mapping_rgb(config, image, depth, viewpoint):
-    gt_image = viewpoint.original_image.cuda()
+    gt_image = viewpoint.original_image.to(cuda_device)
     l1_rgb = torch.abs(image * viewpoint.rgb_pixel_mask_mapping - 
                        gt_image * viewpoint.rgb_pixel_mask_mapping)
 
@@ -239,7 +240,7 @@ def get_loss_mapping_rgb(config, image, depth, viewpoint):
 
 def get_loss_mapping_rgbd(config, image, depth, viewpoint, initialization=False):
     alpha = config["Training"]["alpha"] if "alpha" in config["Training"] else 0.95
-    gt_image = viewpoint.original_image.cuda()
+    gt_image = viewpoint.original_image.to(cuda_device)
 
     rgb_pixel_mask = viewpoint.rgb_pixel_mask_mapping
     depth_pixel_mask = (viewpoint.gt_depth > 0.01).view(*depth.shape)
@@ -262,14 +263,14 @@ def get_loss_mapping_per_pixel(config, image, depth, viewpoint, opacity, initial
 
 
 def get_loss_mapping_rgb_per_pixel(config, image, depth, viewpoint):
-    gt_image = viewpoint.original_image.cuda()
+    gt_image = viewpoint.original_image.to(cuda_device)
     l1_rgb = image * viewpoint.rgb_pixel_mask_mapping - gt_image * viewpoint.rgb_pixel_mask_mapping
 
     return l1_rgb
 
 def get_loss_mapping_rgbd_per_pixel(config, image, depth, viewpoint, initialization=False):
     alpha = config["Training"]["alpha"] if "alpha" in config["Training"] else 0.95
-    gt_image = viewpoint.original_image.cuda()
+    gt_image = viewpoint.original_image.to(cuda_device)
 
     rgb_pixel_mask = viewpoint.rgb_pixel_mask_mapping
     depth_pixel_mask = (viewpoint.gt_depth > 0.01).view(*depth.shape)
