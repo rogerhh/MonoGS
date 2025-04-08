@@ -132,7 +132,9 @@ class ApplyExposure(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        torch.cuda.synchronize()
         apply_exposure_start = time.time()
+
         saved_tensors = ctx.saved_tensors
         image = saved_tensors[0]
         exposure_a = saved_tensors[1]
@@ -155,7 +157,6 @@ class ApplyExposure(torch.autograd.Function):
         grad_sketch_dexposure = None
 
         if ctx.sketch_mode != 0:
-            sum_start = time.time()
             d = ctx.sketch_dim
             stack_dim = ctx.stack_dim
             assert(sketch_dexposure is not None)
@@ -170,15 +171,17 @@ class ApplyExposure(torch.autograd.Function):
             rand_indices_row_i = rand_indices_row[repeat_iter]
             rand_indices_col_i = rand_indices_col[repeat_iter]
 
-            grad_sketch_dexposure[:, :, 0] = grad_output_image[temp_indices, rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
-            grad_sketch_dexposure[:, :, 1] = grad_output[temp_indices, rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
+            grad_sketch_dexposure[:, :, 0] = grad_output_image_gray[rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
+            grad_sketch_dexposure[:, :, 1] = grad_output_gray[rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
+            # grad_sketch_dexposure[:, :, 0] = grad_output_image[temp_indices, rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
+            # grad_sketch_dexposure[:, :, 1] = grad_output[temp_indices, rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
+            # print(f"Sum time: {sum_end - sum_start}")
 
-            sum_end = time.time()
 
             ctx.repeat_iter += 1
 
+        torch.cuda.synchronize()
         apply_exposure_end = time.time()
-        # print(f"ApplyExposure backward time ms: {(apply_exposure_end - apply_exposure_start) * 1000}")
 
         return grad_image, grad_exposure_a, grad_exposure_b, grad_exposure_eps, grad_sketch_mode, grad_sketch_dim, grad_stack_dim, grad_rand_indices, grad_sketch_dexposure
 

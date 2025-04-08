@@ -244,22 +244,22 @@ Training:
   # Hybrid
   RGN:
     pnorm: 2
-    use_huber: False
-    huber_delta: 0.001
     first_order:
-      max_iter: 20
+      max_iter: 10
       fast_iter: 0
       num_backward_gaussians: -1
       num_pixels: -1
     second_order:
-      max_iter: 5
+      max_iter: 10
       num_backward_gaussians: -1
-      sketch_aspect: 8
+      repeat_dim: 1
+      stack_dim: 4
+      sketch_dim: 64
       initial_lambda: 0.1
       max_lambda: 10000000
       min_lambda: 0.000001
-      increase_factor: 2
-      decrease_factor: 2
+      increase_factor: 5
+      decrease_factor: 5
       trust_region_cutoff: 0.0001
       converged_threshold: 0.00001
       use_nonmonotonic_step: False
@@ -274,19 +274,6 @@ Training:
     save_period: 10
 
   experiment_step: -1
-
-
-  sketch_aspect: 2
-  num_backward_gaussians: 300
-  lambda: 0.01
-  max_lambda: 100000000
-  min_lambda: 0.00001
-  increase_factor: 4
-  decrease_factor: 6
-  max_iter_without_improvement: 10
-  second_order: False
-  switch_to_first_order: False
-  override_with_gt: False
 
   lr:
     # cam_rot_delta: 0.0003
@@ -320,7 +307,7 @@ model_params:
   model_path: ""
   resolution: -1
   white_background: False
-  data_device: "cuda"
+  data_device: "cuda:0"
 
 pipeline_params:
   convert_SHs_python: False

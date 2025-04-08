@@ -23,6 +23,7 @@ from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose, trans_diff, angle_diff, pose_diff, relative_pose_error
 from utils.slam_utils import get_loss_tracking, get_loss_tracking_per_pixel, get_median_depth, HuberLoss
 from processing.utils import load_data
+from utils.configs import cuda_device
 
 class TempCamera:
     def __init__(self, viewpoint):
@@ -51,52 +52,6 @@ class TempCamera:
         self.exposure_a.data += x[6]
         self.exposure_b.data += x[7]
 
-class SubsamplePixels(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, loss_tracking_img, num_pixels):
-        # Compute loss_tracking_vec1 and dist
-        loss_tracking_vec1 = torch.sum(torch.abs(loss_tracking_img), dim=0).flatten() + 1e-8
-        with torch.no_grad():
-            dist = loss_tracking_vec1 / torch.sum(loss_tracking_vec1)
-            selected_indices = torch.multinomial(dist, num_pixels, replacement=True)
-        
-        # Compute loss_tracking_vec and loss_tracking
-        loss_tracking_vec = loss_tracking_vec1 / dist
-        loss_tracking = torch.sum(loss_tracking_vec[selected_indices])
-        loss_tracking = loss_tracking / num_pixels
-
-        # Save tensors needed for backward
-        ctx.save_for_backward(loss_tracking_vec, dist, selected_indices)
-        ctx.num_pixels = num_pixels
-        ctx.img_shape = loss_tracking_img.shape
-
-        return loss_tracking, selected_indices
-
-    @staticmethod
-    def backward(ctx, grad_output, grad_output_indices):
-        subsample_start = time.time()
-        
-        # Retrieve saved tensors and context
-        loss_tracking_vec, dist, selected_indices = ctx.saved_tensors
-        num_pixels = ctx.num_pixels
-
-        # Compute the gradient for loss_tracking_img
-        grad_loss_tracking_vec = torch.zeros_like(loss_tracking_vec)
-        grad_loss_tracking_vec[selected_indices] = grad_output / num_pixels
-
-        grad_loss_tracking_vec1 = grad_loss_tracking_vec / dist
-        grad_loss_tracking_img = grad_loss_tracking_vec1.view(ctx.img_shape[1:])
-        grad_loss_tracking_img = grad_loss_tracking_img.repeat(ctx.img_shape[0], 1, 1)
-        print(f"grad_loss_tracking_img.shape = {grad_loss_tracking_img.shape}")
-
-        subsample_end = time.time()
-        print(f"Subsample time ms: {(subsample_end - subsample_start) * 1000}")
-
-        # grad for num_pixels is None since it's not differentiable
-        return grad_loss_tracking_img, None
-
-
-
 class FrontEnd(mp.Process):
     def __init__(self, config):
         super().__init__()
@@ -122,7 +77,7 @@ class FrontEnd(mp.Process):
 
         self.gaussians = None
         self.cameras = dict()
-        self.device = "cuda:0"
+        self.device = cuda_device
         self.pause = False
 
         # LM Parameters
@@ -133,8 +88,6 @@ class FrontEnd(mp.Process):
         self.second_order_max_iter = self.config["Training"]["RGN"]["second_order"]["max_iter"]
         self.second_order_num_backward_gaussians = self.config["Training"]["RGN"]["second_order"]["num_backward_gaussians"]
         self.pnorm = self.config["Training"]["RGN"]["pnorm"]
-        self.use_huber = self.config["Training"]["RGN"]["use_huber"]
-        self.huber_delta = self.config["Training"]["RGN"]["huber_delta"]
         self.repeat_dim = self.config["Training"]["RGN"]["second_order"]["repeat_dim"]
         self.stack_dim = self.config["Training"]["RGN"]["second_order"]["stack_dim"]
         self.sketch_dim = self.config["Training"]["RGN"]["second_order"]["sketch_dim"]
@@ -175,17 +128,37 @@ class FrontEnd(mp.Process):
 
         self.tracking_time_sum = 0
         self.first_order_time_sum = 0
+        self.first_order_render_sum = 0
+        self.first_order_compute_loss_sum = 0
         self.first_order_backward_sum = 0
         self.first_order_count = 0
         self.second_order_time_sum = 0
         self.second_order_forward_sum = 0
         self.second_order_gen_random_sum = 0
+        self.second_order_render_sum = 0
+        self.second_order_compute_loss_sum = 0
+        self.second_order_backward_setup_sum = 0
         self.second_order_backward_sum = 0
         self.second_order_ls_solve_sum = 0
         self.second_order_update_sum = 0
         self.second_order_count = 0
 
         self.last_kf_idx = 1
+
+        width = self.config["Dataset"]["Calibration"]["width"]
+        height = self.config["Dataset"]["Calibration"]["height"]
+        tau_len = 6
+        exposure_len = 2
+        n = tau_len + exposure_len
+        m = height * width
+        d = self.stack_dim * self.sketch_dim
+        chunk_size = m // d
+
+        # These are static tensors so can initialize them here
+        self.sketch_index_offsets = (torch.arange(self.stack_dim, dtype=torch.int32, device=self.device) * (chunk_size*d)).repeat_interleave(chunk_size*d // self.stack_dim)
+        self.sketch_index_vals = torch.arange(self.sketch_dim, dtype=torch.int32, device=self.device).repeat_interleave(chunk_size).repeat(self.stack_dim)
+        self.sketch_index_indices = torch.arange(chunk_size*d, dtype=torch.int32, device=self.device)
+
 
 
     def set_hyperparams(self):
@@ -210,7 +183,7 @@ class FrontEnd(mp.Process):
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
         self.kf_indices.append(cur_frame_idx)
         viewpoint = self.cameras[cur_frame_idx]
-        gt_img = viewpoint.original_image.cuda()
+        gt_img = viewpoint.original_image.to(self.device)
         valid_rgb = (gt_img.sum(dim=0) > rgb_boundary_threshold)[None]
         if self.monocular:
             if depth is None:
@@ -298,6 +271,7 @@ class FrontEnd(mp.Process):
         m = height * width
         d = stack_dim * sketch_dim
 
+        """
         chunk_size = m // d
         rand_flat_indices = torch.empty((repeat_dim, chunk_size*d), dtype=torch.int32, device=self.device)
 
@@ -318,6 +292,30 @@ class FrontEnd(mp.Process):
         sketch_indices[torch.arange(repeat_dim).view(-1, 1, 1, 1), 
                        torch.arange(stack_dim).view(1, -1, 1, 1),
                        rand_indices_row, rand_indices_col] = i_values
+        """
+        chunk_size = m // d
+        rand_flat_indices = torch.empty((repeat_dim, chunk_size*d), dtype=torch.int32, device=self.device)
+        
+        sketch_indices = torch.ones((repeat_dim, stack_dim*height*width), dtype=torch.int32, device=self.device) * (-1)
+        rand_indices_row = torch.empty((repeat_dim, stack_dim, sketch_dim, chunk_size), dtype=torch.int32, device=self.device)
+        rand_indices_col = torch.empty((repeat_dim, stack_dim, sketch_dim, chunk_size), dtype=torch.int32, device=self.device)
+        
+        streams = [torch.cuda.Stream(device=self.device) for _ in range(repeat_dim)]
+        
+        for i in range(repeat_dim):
+            with torch.cuda.stream(streams[i]):
+                rand_flat_indices[i] = torch.randperm(m, dtype=torch.int32, device=self.device)[:(chunk_size*d)]
+                sketch_indices[i, rand_flat_indices[i, self.sketch_index_indices] + self.sketch_index_offsets] = self.sketch_index_vals
+                rand_indices_row_i = rand_flat_indices[i] // width
+                rand_indices_col_i = rand_flat_indices[i] % width
+                
+                rand_indices_row[i] = rand_indices_row_i.view(stack_dim, sketch_dim, chunk_size)
+                rand_indices_col[i] = rand_indices_col_i.view(stack_dim, sketch_dim, chunk_size)
+         
+        torch.cuda.synchronize()
+        sketch_indices = sketch_indices.reshape((repeat_dim, stack_dim, height, width))
+        rand_indices = (rand_indices_row, rand_indices_col)
+        
 
         rand_weights = torch.randint(0, 2, size=(repeat_dim, height, width), dtype=torch.float32, device=self.device) * 2 - 1
 
@@ -485,10 +483,14 @@ class FrontEnd(mp.Process):
             if tracking_itr >= first_order_fast_iter:
                 first_order_num_backward_gaussians = -1
 
+            torch.cuda.synchronize()
+            render_start = time.time()
+
             render_pkg = render(
                 viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
             )
 
+            torch.cuda.synchronize()
             render_end = time.time()
 
             image, depth, opacity = (
@@ -500,13 +502,14 @@ class FrontEnd(mp.Process):
             loss_tracking_img = get_loss_tracking_per_pixel(
                 self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
             )
-            if self.use_huber:
-                loss_tracking_img = HuberLoss.apply(loss_tracking_img, self.huber_delta)
 
             loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=1)
-            trans_error, angle_error = relative_pose_error(last_kf.T_gt, viewpoint.T_gt, last_kf.T, viewpoint.T)
+
+            torch.cuda.synchronize()
+            compute_loss_end = time.time()
 
             if print_output:
+                trans_error, angle_error = relative_pose_error(last_kf.T_gt, viewpoint.T_gt, last_kf.T, viewpoint.T)
                 print(f"iter = {tracking_itr}, loss = {loss_tracking_scalar.item():.4f}, trans_error = {trans_error:.4f}, angle_error = {angle_error:.4f}")
 
             if log_output:
@@ -534,13 +537,8 @@ class FrontEnd(mp.Process):
                     if not use_nonmonotonic_step:
                         is_new_step = False
 
-                # if lambda_ >= max_lambda:
-                #     print(f"Trust region cutoff reached: {lambda_} >= {max_lambda}\nSecond order optimization converged")
-                #     break
-
-                # # DEBUG
-                # is_new_step = False
-                # # DEBUG END
+            # DEBUG
+            is_new_step = True
 
             if not is_new_step:
                 old_viewpoint_params, _, _, _, _, _, _, = old_output
@@ -561,9 +559,8 @@ class FrontEnd(mp.Process):
                 loss_tracking_img = get_loss_tracking_per_pixel(
                     self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
                 )
-                if self.use_huber:
-                    loss_tracking_img = HuberLoss.apply(loss_tracking_img, self.huber_delta)
 
+            torch.cuda.synchronize()
             forward_end = time.time()
 
             if not in_second_order:
@@ -583,7 +580,6 @@ class FrontEnd(mp.Process):
                     loss_tracking_vec = loss_tracking_vec1 / dist
                     loss_tracking = torch.sum(loss_tracking_vec[selected_pixel_indices])
                     loss_tracking = loss_tracking / num_pixels
-                    # loss_tracking, selected_pixel_indices = SubsamplePixels.apply(loss_tracking_img, num_pixels)
 
                     image._grad_fn.select_pixels = True
                     image._grad_fn.selected_pixel_indices = selected_pixel_indices
@@ -603,18 +599,8 @@ class FrontEnd(mp.Process):
                     loss_tracking.backward()
 
                     first_order_backward_end = time.time()
-                    # profile_data["rasterize_gaussians_backward_time_ms"].append(first_order_backward_stats["rasterize_gaussians_backward_time_ms"])
-                    # profile_data["rasterize_gaussians_C_backward_time_ms"].append(first_order_backward_stats["rasterize_gaussians_C_backward_time_ms"])
 
                     pose_optimizer.step()
-
-                    # print("x = ", viewpoint.cam_trans_delta, viewpoint.cam_rot_delta, viewpoint.exposure_a, viewpoint.exposure_b)
-
-                    # if second_to_first:
-                    #     tau = torch.cat([viewpoint.cam_trans_delta,
-                    #                      viewpoint.cam_rot_delta], axis=0)
-                    #     print(f"step norm = {(tau**2).sum().sqrt().item():.4f}")
-                    #     import code; code.interact(local=locals())
 
                     first_order_step_end = time.time()
 
@@ -637,6 +623,9 @@ class FrontEnd(mp.Process):
 
             else:
 
+                torch.cuda.synchronize()
+                second_order_backward_setup_start = time.time()
+
                 sketch_dim_per_iter = stack_dim * sketch_dim
                 loss_tracking_img = loss_tracking_img.sum(dim=0) / (m / sketch_dim_per_iter)
 
@@ -649,7 +638,8 @@ class FrontEnd(mp.Process):
                 batch_indices = torch.arange(repeat_dim).view(-1, 1, 1, 1)
                 Sf = weighted_loss_tracking_img[batch_indices, rand_indices_row, rand_indices_col].sum(dim=-1)
 
-                second_order_backward_start = time.time()
+                torch.cuda.synchronize()
+                second_order_backward_setup_end = time.time()
 
                 for i in range(repeat_dim):
 
@@ -672,6 +662,7 @@ class FrontEnd(mp.Process):
                     damped_SJ = torch.cat((SJ, torch.eye(n, device=self.device) * math.sqrt(lambda_)), dim=0)
                     damped_Sf = torch.cat((Sf, torch.zeros(n, device=self.device)), dim=0)
 
+                    torch.cuda.synchronize()
                     second_order_backward_end = time.time()
                     second_order_ls_solve_start = time.time()
 
@@ -682,6 +673,7 @@ class FrontEnd(mp.Process):
                     # H_damp = H + torch.eye(n, device=self.device) * lambda_
                     # x = torch.linalg.solve(H_damp, -g)
 
+                    torch.cuda.synchronize()
                     second_order_ls_solve_end = time.time()
 
                     # distortion = math.sqrt(n / (d * eta))
@@ -695,6 +687,7 @@ class FrontEnd(mp.Process):
                     new_viewpoint_params.step(x)
                     second_order_converged = x.norm() < second_order_converged_threshold
 
+                    torch.cuda.synchronize()
                     second_order_update_end = time.time()
 
                     if print_output:
@@ -722,12 +715,17 @@ class FrontEnd(mp.Process):
                 self.second_order_time_sum += tracking_itr_end - tracking_iter_start
                 self.second_order_forward_sum += forward_end - tracking_iter_start
                 self.second_order_gen_random_sum += second_order_random_gen_end - second_order_random_gen_start
-                self.second_order_backward_sum += second_order_backward_end - second_order_backward_start
+                self.second_order_render_sum += render_end - render_start
+                self.second_order_compute_loss_sum += compute_loss_end - render_end
+                self.second_order_backward_setup_sum += second_order_backward_setup_end - second_order_backward_setup_start
+                self.second_order_backward_sum += second_order_backward_end - second_order_backward_setup_end
                 self.second_order_ls_solve_sum += second_order_ls_solve_end - second_order_ls_solve_start
                 self.second_order_update_sum += second_order_update_end - second_order_ls_solve_end
                 self.second_order_count += 1
             else:
                 self.first_order_time_sum += tracking_itr_end - tracking_iter_start
+                self.first_order_render_sum += render_end - render_start
+                self.first_order_compute_loss_sum += compute_loss_end - render_end
                 self.first_order_backward_sum += first_order_backward_end - first_order_backward_start
                 self.first_order_count += 1
 
@@ -741,21 +739,6 @@ class FrontEnd(mp.Process):
                         else np.zeros((viewpoint.image_height, viewpoint.image_width)),
                     )
                 )
-
-            # DEBUG
-            # tracking_end = time.time()
-
-            # render_time_ms = (render_end - tracking_iter_start) * 1000
-            # compute_loss_time_ms = (compute_loss_end - render_end) * 1000
-            # subsample_time_ms = (subsample_end - compute_loss_end) * 1000
-            # first_order_backward_time_ms = (first_order_backward_end - subsample_end) * 1000
-            # optimizer_step_time_ms = (optimizer_step_end - first_order_backward_end) * 1000
-            # update_pose_time_ms = (update_pose_end - optimizer_step_end) * 1000
-            # tracking_time_ms = (tracking_end - tracking_iter_start) * 1000
-
-            # print(f"render time ms: {render_time_ms:.4f}, compute loss time ms: {compute_loss_time_ms:.4f}, subsample time ms: {subsample_time_ms:.4f}, first order backward time ms: {first_order_backward_time_ms:.4f}, optimizer step time ms: {optimizer_step_time_ms:.4f}, update pose time ms: {update_pose_time_ms:.4f}, tracking time ms: {tracking_time_ms:.4f}")
-
-            # DEBUG END
 
         if print_output:
             print("Tracking converged in {} iterations".format(tracking_itr))
@@ -811,8 +794,6 @@ class FrontEnd(mp.Process):
             loss_tracking_img = get_loss_tracking_per_pixel(
                 self.config, image, depth, opacity, viewpoint
             )
-            if self.use_huber:
-                loss_tracking_img = HuberLoss.apply(loss_tracking_img, self.huber_delta)
 
             loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=2)
             # trans_error = (viewpoint.T - viewpoint.T_gt).norm()
@@ -822,9 +803,6 @@ class FrontEnd(mp.Process):
                 print(f"override loss = {loss_tracking_scalar.item():.4f}") #, trans_error = {trans_error.item():.4f}, angle_error = {angle_error.item():.4f}, lambda = {lambda_:.4f}")
 
         elif not self.use_best_loss:
-            # old_viewpoint_params, render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, = old_output
-            # old_viewpoint_params.assign(viewpoint)
-            # loss_tracking_scalar = old_loss_scalar
             trans_error = (viewpoint.T - viewpoint.T_gt).norm()
             if print_output:
                 print(f"Last loss = {old_loss_scalar.item():.4f}, trans error = {trans_error.item():.4f}")
@@ -846,18 +824,28 @@ class FrontEnd(mp.Process):
             avg_second_order_time = 0
             if self.first_order_count > 0:
                 avg_first_order_time = self.first_order_time_sum / self.first_order_count
+                avg_first_order_render = self.first_order_render_sum / self.first_order_count
+                avg_first_order_compute_loss = self.first_order_compute_loss_sum / self.first_order_count
                 avg_first_order_backward = self.first_order_backward_sum / self.first_order_count
                 print(f"Average first order time ms: {avg_first_order_time * 1000}")
+                print(f"Average first order render time ms: {avg_first_order_render * 1000}")
+                print(f"Average first order compute loss time ms: {avg_first_order_compute_loss * 1000}")
                 print(f"Average first order backward time ms: {avg_first_order_backward * 1000}")
             if self.second_order_count > 0:
                 avg_second_order_time = self.second_order_time_sum / self.second_order_count
                 avg_second_order_forward = self.second_order_forward_sum / self.second_order_count
                 avg_second_order_gen_random = self.second_order_gen_random_sum / self.second_order_count
+                avg_second_order_render = self.second_order_render_sum / self.second_order_count
+                avg_second_order_compute_loss = self.second_order_compute_loss_sum / self.second_order_count
+                avg_second_order_backward_setup = self.second_order_backward_setup_sum / self.second_order_count
                 avg_second_order_backward = self.second_order_backward_sum / self.second_order_count
                 avg_second_order_ls_solve = self.second_order_ls_solve_sum / self.second_order_count
                 avg_second_order_update = self.second_order_update_sum / self.second_order_count
                 print(f"Average second order forward time ms: {avg_second_order_forward * 1000}")
                 print(f"Average second order gen random time ms: {avg_second_order_gen_random * 1000}")
+                print(f"Average second order render time ms: {avg_second_order_render * 1000}")
+                print(f"Average second order compute loss time ms: {avg_second_order_compute_loss * 1000}")
+                print(f"Average second order backward setup time ms: {avg_second_order_backward_setup * 1000}")
                 print(f"Average second order backward time ms: {avg_second_order_backward * 1000}")
                 print(f"Average second order ls solve time ms: {avg_second_order_ls_solve * 1000}")
                 print(f"Average second order update time ms: {avg_second_order_update * 1000}")
@@ -866,11 +854,16 @@ class FrontEnd(mp.Process):
             print(f"Projected tracking time ms = {(projected_tracking_time) * 1000}")
             self.tracking_time_sum = 0
             self.first_order_time_sum = 0
+            self.first_order_render_sum = 0
+            self.first_order_compute_loss_sum = 0
             self.first_order_backward_sum = 0
             self.first_order_count = 0
             self.second_order_forward_sum = 0
             self.second_order_gen_random_sum = 0
+            self.second_order_render_sum = 0
+            self.second_order_compute_loss_sum = 0
             self.second_order_time_sum = 0
+            self.second_order_backward_setup_sum = 0
             self.second_order_backward_sum = 0
             self.second_order_ls_solve_sum = 0
             self.second_order_update_sum = 0
@@ -1101,6 +1094,7 @@ class FrontEnd(mp.Process):
             for i in range(repeat_dim):
                 for j in range(stack_dim):
                     for k in range(sketch_dim):
+                        print(f"repeat_iter = {i}, stack_iter = {j}, sketch_iter = {k}")
                         weighted_default_loss_tracking_img_ijk = default_Sf[i, j, k]
 
                         viewpoint.cam_rot_delta.grad = None
@@ -1114,10 +1108,12 @@ class FrontEnd(mp.Process):
 
                         correct_SJ_ijk = torch.cat((viewpoint.cam_trans_delta.grad, viewpoint.cam_rot_delta.grad, viewpoint.exposure_a.grad, viewpoint.exposure_b.grad), dim=0)
 
+                        assert torch.allclose(SJ[i, j, k], correct_SJ_ijk, atol=1e-6), f"i = {i}, j = {j}, k = {k}, SJ[i, j, k] = {SJ[i, j, k]}, correct_SJ_ijk = {correct_SJ_ijk}"
+
+            print("Gradient check passed")
 
             SJ = SJ.reshape((-1, n))
             Sf = Sf.flatten()
-            import code; code.interact(local=locals())
 
         elif check_sketch:
             prev_avg_SJ = None
@@ -1300,7 +1296,7 @@ class FrontEnd(mp.Process):
         elif repeat_second_order:
             cached_forward_sketch_args = None
 
-            image_gt = viewpoint.original_image.cuda()
+            image_gt = viewpoint.original_image.to(self.device)
             image_np = image_gt.permute(1, 2, 0)
             image_np = image_np.detach().cpu().numpy()
             image_np = (image_np * 255).astype(np.uint8)

@@ -7,13 +7,13 @@ if __name__ == "__main__":
     # Generate a well-conditioned least squares problem
     m, n = 300000, 8  # m >> n for overdetermined system
     noise = 1e-5
-    lambda_ = 0.01
+    lambda_ = 10000
     x_norm = 0.015
     gen_max_sigma = 5
     gen_min_sigma = 1e-2
-    repeat_dim = 2
+    repeat_dim = 1
     stack_dim = 1
-    sketch_dim = 64
+    sketch_dim = 32
     solve_mode = "append_damp" # "sketch_damp" or "append_damp"
     sketch_mode = "count" # "count" or "gaussian"
 
