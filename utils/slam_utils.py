@@ -76,7 +76,6 @@ class HuberLoss(torch.autograd.Function):
 
 def huber_loss(x, delta=0.1):
     delta_sq = delta ** 2
-    import code; code.interact(local=locals())
     loss = torch.where(x.abs() < delta, x.abs(), torch.sqrt(2 * delta * x.abs() - delta_sq))
     # loss = torch.abs(x)
     return loss

@@ -1,5 +1,8 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
 export CUDA_PATH=/usr/local/cuda-12.6
 export PATH="$CUDA_PATH/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_PATH/bin/lib64:$LD_LIBRARY_PATH"
@@ -11,3 +14,5 @@ fi
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
 export QT_QPA_PLATFORM=offscreen
+
+export PYTHONPATH="$PROJECT_DIR:$PYTHONPATH"

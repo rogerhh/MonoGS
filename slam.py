@@ -235,7 +235,7 @@ if __name__ == "__main__":
 
     if config["Results"]["save_results"] or config["Results"]["save_initial_ply"]:
         mkdir_p(config["Results"]["save_dir"])
-        current_datetime = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = config["Dataset"]["dataset_path"].split("/")
         save_dir = os.path.join(
             config["Results"]["save_dir"], path[-3] + "_" + path[-2], current_datetime

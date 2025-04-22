@@ -21,7 +21,7 @@ from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose, trans_diff, angle_diff, pose_diff, relative_pose_error
-from utils.slam_utils import get_loss_tracking, get_loss_tracking_per_pixel, get_median_depth, HuberLoss
+from utils.slam_utils import get_loss_tracking, get_loss_tracking_per_pixel, get_median_depth, HuberLoss, huber_loss
 from processing.utils import load_data
 from utils.configs import cuda_device
 
@@ -35,16 +35,16 @@ class TempCamera:
         self.exposure_b = viewpoint.exposure_b.detach().clone()
 
     def assign(self, viewpoint):
-        # viewpoint.T.data.copy_(self.T)
-        # viewpoint.cam_rot_delta.data.copy_(self.cam_rot_delta)
-        # viewpoint.cam_trans_delta.data.copy_(self.cam_trans_delta)
-        # viewpoint.exposure_a.data.copy_(self.exposure_a)
-        # viewpoint.exposure_b.data.copy_(self.exposure_b)
-        viewpoint.T = self.T
-        viewpoint.cam_rot_delta = nn.Parameter(self.cam_rot_delta)
-        viewpoint.cam_trans_delta = nn.Parameter(self.cam_trans_delta)
-        viewpoint.exposure_a = nn.Parameter(self.exposure_a)
-        viewpoint.exposure_b = nn.Parameter(self.exposure_b)
+        viewpoint.T = self.T.detach().clone()
+        viewpoint.cam_rot_delta.data.copy_(self.cam_rot_delta)
+        viewpoint.cam_trans_delta.data.copy_(self.cam_trans_delta)
+        viewpoint.exposure_a.data.copy_(self.exposure_a)
+        viewpoint.exposure_b.data.copy_(self.exposure_b)
+        # viewpoint.T = self.T
+        # viewpoint.cam_rot_delta = nn.Parameter(self.cam_rot_delta)
+        # viewpoint.cam_trans_delta = nn.Parameter(self.cam_trans_delta)
+        # viewpoint.exposure_a = nn.Parameter(self.exposure_a)
+        # viewpoint.exposure_b = nn.Parameter(self.exposure_b)
 
     def step(self, x):
         self.cam_trans_delta.data += x[:3]
@@ -81,6 +81,8 @@ class FrontEnd(mp.Process):
         self.pause = False
 
         # LM Parameters
+        self.use_huber = self.config["Training"]["RGN"]["use_huber"]
+        self.huber_delta = self.config["Training"]["RGN"]["huber_delta"]
         self.first_order_max_iter = self.config["Training"]["RGN"]["first_order"]["max_iter"]
         self.first_order_fast_iter = self.config["Training"]["RGN"]["first_order"]["fast_iter"]
         self.first_order_num_backward_gaussians = self.config["Training"]["RGN"]["first_order"]["num_backward_gaussians"]
@@ -343,6 +345,8 @@ class FrontEnd(mp.Process):
             return self.tracking_experiment(cur_frame_idx, viewpoint)
             exit()
 
+        # prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
+        # viewpoint.T = prev.T
         if self.initialized and cur_frame_idx > self.constant_velocity_warmup and self.monocular:
             prev_prev = self.cameras[cur_frame_idx - self.use_every_n_frames -1 ]
             prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
@@ -469,10 +473,11 @@ class FrontEnd(mp.Process):
             # If in second order and new_viewpoint_params is not None
             # Then cache the old data
             if in_second_order and new_viewpoint_params is not None:
-                old_loss_scalar = loss_tracking_scalar
-                old_output = (TempCamera(viewpoint), render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, )
-                new_viewpoint_params.assign(viewpoint)
-                update_pose(viewpoint)
+                with torch.no_grad():
+                    old_loss_scalar = loss_tracking_scalar
+                    old_output = (TempCamera(viewpoint), render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, )
+                    new_viewpoint_params.assign(viewpoint)
+                    update_pose(viewpoint)
 
             # Set up sketching in the forward pass
             if in_second_order:
@@ -483,14 +488,14 @@ class FrontEnd(mp.Process):
             if tracking_itr >= first_order_fast_iter:
                 first_order_num_backward_gaussians = -1
 
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
             render_start = time.time()
 
             render_pkg = render(
                 viewpoint, self.gaussians, self.pipeline_params, self.background, forward_sketch_args=forward_sketch_args,
             )
 
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
             render_end = time.time()
 
             image, depth, opacity = (
@@ -505,7 +510,7 @@ class FrontEnd(mp.Process):
 
             loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=1)
 
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
             compute_loss_end = time.time()
 
             if print_output:
@@ -560,7 +565,7 @@ class FrontEnd(mp.Process):
                     self.config, image, depth, opacity, viewpoint, forward_sketch_args=forward_sketch_args,
                 )
 
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
             forward_end = time.time()
 
             if not in_second_order:
@@ -589,7 +594,11 @@ class FrontEnd(mp.Process):
                 # DEBUG END
 
                 else:
-                    loss_tracking = torch.norm(loss_tracking_img.flatten(), p=self.pnorm)
+                    if self.use_huber:
+                        loss_tracking_img = HuberLoss.apply(loss_tracking_img, self.huber_delta)
+                        loss_tracking = torch.norm(loss_tracking_img.flatten(), p=2)
+                    else:
+                        loss_tracking = torch.norm(loss_tracking_img.flatten(), p=self.pnorm)
 
                 # subsample_end = time.time()
 
@@ -627,6 +636,8 @@ class FrontEnd(mp.Process):
                 second_order_backward_setup_start = time.time()
 
                 sketch_dim_per_iter = stack_dim * sketch_dim
+                if self.use_huber:
+                    loss_tracking_img = HuberLoss.apply(loss_tracking_img, self.huber_delta)
                 loss_tracking_img = loss_tracking_img.sum(dim=0) / (m / sketch_dim_per_iter)
 
                 rand_weights = forward_sketch_args["rand_weights"]
@@ -805,7 +816,7 @@ class FrontEnd(mp.Process):
         elif not self.use_best_loss:
             trans_error = (viewpoint.T - viewpoint.T_gt).norm()
             if print_output:
-                print(f"Last loss = {old_loss_scalar.item():.4f}, trans error = {trans_error.item():.4f}")
+                print(f"Last loss = {loss_tracking_scalar.item():.4f}, trans error = {trans_error.item():.4f}")
         else:
             best_viewpoint_params, render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, = best_output
             best_viewpoint_params.assign(viewpoint)
