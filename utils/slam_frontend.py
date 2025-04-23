@@ -162,7 +162,6 @@ class FrontEnd(mp.Process):
         self.sketch_index_indices = torch.arange(chunk_size*d, dtype=torch.int32, device=self.device)
 
 
-
     def set_hyperparams(self):
         self.save_dir = self.config["Results"]["save_dir"]
         self.save_results = self.config["Results"]["save_results"]
@@ -883,7 +882,7 @@ class FrontEnd(mp.Process):
         if log_output:
             profile_data["frame"] = cur_frame_idx
             profile_data["timestamps"].append(time.time())
-            profile_data["pose"] = [viewpoint.R, viewpoint.T]
+            profile_data["pose"] = [viewpoint.T]
             profile_data["exposure"] = [viewpoint.exposure_a, viewpoint.exposure_b]
             profile_data["num_iters"] = tracking_itr
             profile_data["loss_tracking_scalar"] = loss_tracking_scalar.item()
