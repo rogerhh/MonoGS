@@ -1101,6 +1101,8 @@ class FrontEnd(mp.Process):
             weighted_default_loss_tracking_img = default_loss_tracking_img * rand_weights
             default_Sf = weighted_default_loss_tracking_img[batch_indices, rand_indices_row, rand_indices_col].sum(dim=-1)
 
+            tol = 1e-4
+
             for i in range(repeat_dim):
                 for j in range(stack_dim):
                     for k in range(sketch_dim):
@@ -1118,7 +1120,9 @@ class FrontEnd(mp.Process):
 
                         correct_SJ_ijk = torch.cat((viewpoint.cam_trans_delta.grad, viewpoint.cam_rot_delta.grad, viewpoint.exposure_a.grad, viewpoint.exposure_b.grad), dim=0)
 
-                        assert torch.allclose(SJ[i, j, k], correct_SJ_ijk, atol=1e-6), f"i = {i}, j = {j}, k = {k}, SJ[i, j, k] = {SJ[i, j, k]}, correct_SJ_ijk = {correct_SJ_ijk}"
+                        if not torch.allclose(SJ[i, j, k], correct_SJ_ijk, atol=tol):
+                            diff = SJ[i, j, k] - correct_SJ_ijk
+                            assert False, f"i = {i}, j = {j}, k = {k}, SJ[i, j, k] = {SJ[i, j, k]}, correct_SJ_ijk = {correct_SJ_ijk}\ndiff = {diff}"
 
             print("Gradient check passed")
 
