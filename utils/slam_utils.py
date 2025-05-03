@@ -170,12 +170,11 @@ class ApplyExposure(torch.autograd.Function):
             rand_indices_row_i = rand_indices_row[repeat_iter]
             rand_indices_col_i = rand_indices_col[repeat_iter]
 
-            grad_sketch_dexposure[:, :, 0] = grad_output_image_gray[rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
-            grad_sketch_dexposure[:, :, 1] = grad_output_gray[rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
+            grad_sketch_dexposure[:, :, 0] = grad_output_image_gray[rand_indices_row_i, rand_indices_col_i].sum(dim=-1)
+            grad_sketch_dexposure[:, :, 1] = grad_output_gray[rand_indices_row_i, rand_indices_col_i].sum(dim=-1)
             # grad_sketch_dexposure[:, :, 0] = grad_output_image[temp_indices, rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
             # grad_sketch_dexposure[:, :, 1] = grad_output[temp_indices, rand_indices_row_i, rand_indices_col_i].sum(dim=(0, -1))
             # print(f"Sum time: {sum_end - sum_start}")
-
 
             ctx.repeat_iter += 1
 
@@ -217,7 +216,10 @@ def get_loss_tracking_rgbd_per_pixel(config, image, depth, opacity, viewpoint, i
     l1_rgb = get_loss_tracking_rgb_per_pixel(config, image, depth, opacity, viewpoint)
     depth_mask = depth_pixel_mask * opacity_mask
     l1_depth = depth * depth_mask - gt_depth * depth_mask
-    raise NotImplementedError("This is currently incorrect because depth loss needs to be stacked on top of rgb loss")
+    # Stack the depth loss on top of the rgb loss
+    l1_loss = torch.cat((alpha * l1_rgb, (1 - alpha) * l1_depth), dim=0)
+    # raise NotImplementedError("This is currently incorrect because depth loss needs to be stacked on top of rgb loss")
+    return l1_loss
     return alpha * l1_rgb + (1 - alpha) * l1_depth
 
 
