@@ -95,7 +95,7 @@ def run_test(m, n, linear_noise, x_norm, lambda_, max_sval, min_sval, repeat_dim
 
     upperbound = res * math.sqrt(gamma ** 2 - 1) / sigma_min
 
-    upperbound_hat = res_sketch * gamma * math.sqrt(gamma_hat ** 2 - 1) / sigma_min_hat
+    upperbound_hat = res_sketch * gamma_hat * math.sqrt(gamma_hat ** 2 - 1) / sigma_min_hat
     # upperbound_hat = res_sketch * 2 * distortion_hat * (1 + distortion_hat) / (((1 - distortion_hat) ** 2) * sigma_min_hat)
 
     # Check the angle between the optimal and sketched solutions

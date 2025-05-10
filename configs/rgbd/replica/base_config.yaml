@@ -3,9 +3,10 @@ Results:
   save_dir: "results"
   save_trj: True
   save_trj_kf_intv: 20
-  use_gui: True
+  use_gui: False
   eval_rendering: False
   use_wandb: False
+  save_initial_ply: False # This quits the program after saving the initial ply file
 
 Dataset:
   sensor_type: 'depth'
@@ -56,9 +57,91 @@ Training:
   prune_mode: 'slam'
   single_thread: True
   spherical_harmonics: False
+
+  # # First only
+  # RGN:
+  #   use_huber: True
+  #   huber_delta: 0.01
+  #   pnorm: 1
+  #   first_order:
+  #     max_iter: 100
+  #     fast_iter: 0
+  #     num_backward_gaussians: -1
+  #     num_pixels: -1
+  #   second_order:
+  #     max_iter: 0
+  #     num_backward_gaussians: -1
+  #     repeat_dim: 1
+  #     stack_dim: 1
+  #     sketch_dim: 32
+  #     initial_lambda: 0.001
+  #     max_lambda: 10000000
+  #     min_lambda: 0.000001
+  #     increase_factor: 5
+  #     decrease_factor: 5
+  #     trust_region_cutoff: 0.0001
+  #     converged_threshold: 0.00001
+  #     use_nonmonotonic_step: False
+  #     use_first_order_best: True
+  #   override:
+  #     mode: "none"  # "gt" or "first" or "none" or "best"
+  #     first_logdir: ""
+  #   use_best_loss: True
+  #   print_output: False
+  #   log_output: True
+  #   log_basedir: "outputs"
+  #   save_period: 10
+
+  #   experimental:
+  #     run_twice: False
+  #     run_twice_first_only: False
+
+  # Hybrid
+  RGN:
+    use_huber: True
+    huber_delta: 0.01
+    pnorm: 1
+    first_order:
+      max_iter: 20
+      fast_iter: 0
+      num_backward_gaussians: -1
+      num_pixels: -1
+    second_order:
+      max_iter: 5
+      num_backward_gaussians: -1
+      repeat_dim: 1
+      stack_dim: 8
+      sketch_dim: 16
+      initial_lambda: 0.001
+      max_lambda: 10000000
+      min_lambda: 0.000001
+      increase_factor: 5
+      decrease_factor: 5
+      trust_region_cutoff: 0.0001
+      converged_threshold: 0.00001
+      use_nonmonotonic_step: False
+      use_first_order_best: True
+    override:
+      mode: "none"  # "gt" or "first" or "none" or "best"
+      first_logdir: ""
+    use_best_loss: True
+    print_output: False
+    log_output: True
+    log_basedir: "outputs"
+    save_period: 10
+
+    experimental:
+      run_twice: True
+      run_twice_first_only: True
+      run_twice_override_gt: True
+
+  experiment_step: -1
+
   lr:
     cam_rot_delta: 0.003
     cam_trans_delta: 0.001
+    exposure_a: 0.02
+    exposure_b: 0.02
 
 
 opt_params:
@@ -85,7 +168,7 @@ model_params:
   model_path: ""
   resolution: -1
   white_background: False
-  data_device: "cuda"
+  data_device: "cuda:0"
   
 pipeline_params:
   convert_SHs_python: False

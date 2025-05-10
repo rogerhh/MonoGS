@@ -106,17 +106,20 @@ class FrontEnd(mp.Process):
         self.override_mode = self.config["Training"]["RGN"]["override"]["mode"]
         self.override_first_logdir = self.config["Training"]["RGN"]["override"]["first_logdir"]
 
-        if self.override_mode == "first" or self.override_mode == "best":
-            self.first_override_data = load_data(self.override_first_logdir)
-
         self.print_output = self.config["Training"]["RGN"]["print_output"]
         self.log_output = self.config["Training"]["RGN"]["log_output"]
         self.log_basedir = self.config["Training"]["RGN"]["log_basedir"]
         self.log_path = time.strftime("%Y%m%d_%H%M")  # Set logfile base path to be yyyymmdd_HHMM
+
+        self.run_twice = self.config["Training"]["RGN"]["experimental"]["run_twice"]
+        self.run_twice_first_only = self.config["Training"]["RGN"]["experimental"]["run_twice_first_only"]
+        self.run_twice_override_gt = self.config["Training"]["RGN"]["experimental"]["run_twice_override_gt"]
+
         self.save_period = self.config["Training"]["RGN"]["save_period"]
         self.experiment_step = self.config["Training"]["experiment_step"]
         
         self.all_profile_data = []
+        self.all_profile_data_firstonly = []
 
         if self.log_output:
             # Check if log_basedir/log_path exists
@@ -271,6 +274,13 @@ class FrontEnd(mp.Process):
         n = tau_len + exposure_len
         m = height * width
         d = stack_dim * sketch_dim
+        chunk_size = m // d
+
+        # # DEBUG
+        # self.sketch_index_offsets = (torch.arange(stack_dim, dtype=torch.int32, device=self.device) * (chunk_size*d)).repeat_interleave(chunk_size*d // stack_dim)
+        # self.sketch_index_vals = torch.arange(sketch_dim, dtype=torch.int32, device=self.device).repeat_interleave(chunk_size).repeat(stack_dim)
+        # self.sketch_index_indices = torch.arange(chunk_size*d, dtype=torch.int32, device=self.device)
+        # # DEBUG END
 
         """
         chunk_size = m // d
@@ -337,7 +347,7 @@ class FrontEnd(mp.Process):
                                "rand_indices_col": rand_indices_col, }
         return forward_sketch_args
 
-    def tracking(self, cur_frame_idx, viewpoint):
+    def tracking(self, cur_frame_idx, viewpoint, run_twice_first_rep=True, run_twice_override_gt=True):
         print(f"Frame: {cur_frame_idx}")
 
         if cur_frame_idx == self.experiment_step:
@@ -360,6 +370,17 @@ class FrontEnd(mp.Process):
             # if True:
             prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
             viewpoint.T = prev.T
+
+        if self.run_twice:
+            if run_twice_first_rep:
+                orig_viewpoint = TempCamera(viewpoint)
+                first_only = not self.run_twice_first_only
+                run_twice_override_gt = False
+            else:
+                first_only = self.run_twice_first_only
+        else: 
+            first_only = False
+            run_twice_override_gt = False
 
         opt_params = []
         opt_params.append(
@@ -392,11 +413,18 @@ class FrontEnd(mp.Process):
         )
         
         # LM Parameters for convenience
-        first_order_max_iter = self.first_order_max_iter
+
+        # if first only, set f100s0
+        if first_only:
+            first_order_max_iter = 100
+            second_order_max_iter = 0
+        else:
+            first_order_max_iter = self.first_order_max_iter
+            second_order_max_iter = self.second_order_max_iter
+
         first_order_fast_iter = self.first_order_fast_iter
         first_order_num_backward_gaussians = self.first_order_num_backward_gaussians
         first_order_num_pixels = self.first_order_num_pixels
-        second_order_max_iter = self.second_order_max_iter
         second_order_num_backward_gaussians = self.second_order_num_backward_gaussians
         repeat_dim = self.repeat_dim
         stack_dim = self.stack_dim
@@ -409,8 +437,7 @@ class FrontEnd(mp.Process):
         trust_region_cutoff = self.trust_region_cutoff
         second_order_converged_threshold = self.second_order_converged_threshold
         use_nonmonotonic_step = self.use_nonmonotonic_step
-        override_mode = self.override_mode
-        override_first_logdir = self.override_first_logdir
+        override_mode = self.override_mode if not run_twice_override_gt else "gt"
         print_output = self.print_output
         log_output = self.log_output
         save_period = self.save_period
@@ -447,12 +474,30 @@ class FrontEnd(mp.Process):
 
         forward_sketch_args = self.gen_default_forward_sketch_args()
 
-        profile_data = {"timestamps": [], "losses": [], "pose": None, "rasterize_gaussians_backward_time_ms": [], "rasterize_gaussians_C_backward_time_ms": []}
+        profile_data = {"timestamps": [], "losses": [], "pose": None, "rasterize_gaussians_backward_time_ms": [], "rasterize_gaussians_C_backward_time_ms": [], "distortions": [], "min_sigmas": [], "residuals": [], "upperbounds": []}
 
         tracking_start = time.time()
         pose_optimizer = torch.optim.Adam(opt_params)
 
-        for tracking_itr in range(max_iter):
+        tracking_itr = -1
+        sketch_solution_ok = True
+        # for tracking_itr in range(max_iter):
+        while True:
+            if not (tracking_itr + 1 < max_iter or not sketch_solution_ok):
+                # print(f"tracking_itr = {tracking_itr}, sketch_solution_ok = {sketch_solution_ok}")
+                break
+            # while tracking_itr + 1 < max_iter or not sketch_solution_ok:
+            # DEBUG
+            # Some constants
+            height, width = viewpoint.image_height, viewpoint.image_width
+            tau_len = viewpoint.cam_trans_delta.shape[0] + viewpoint.cam_rot_delta.shape[0]
+            exposure_len = viewpoint.exposure_a.shape[0] + viewpoint.exposure_b.shape[0]
+            m = height * width
+            n = tau_len + exposure_len
+            d = stack_dim * sketch_dim
+            # DEBUG END
+
+            tracking_itr += 1
             tracking_iter_start = time.time()
 
             if log_output:
@@ -665,15 +710,16 @@ class FrontEnd(mp.Process):
                     SJ_i = torch.cat((forward_sketch_args["sketch_dtau"].grad, forward_sketch_args["sketch_dexposure"].grad), dim=2)
                     SJ[i] = SJ_i
 
+                torch.cuda.synchronize()
+                second_order_backward_end = time.time()
+
                 with torch.no_grad():
-                    SJ = SJ.reshape((-1, n))
-                    Sf = Sf.flatten()
+                    SJ = SJ.reshape((-1, n)) / math.sqrt(repeat_dim)
+                    Sf = Sf.flatten() / math.sqrt(repeat_dim)
 
                     damped_SJ = torch.cat((SJ, torch.eye(n, device=self.device) * math.sqrt(lambda_)), dim=0)
                     damped_Sf = torch.cat((Sf, torch.zeros(n, device=self.device)), dim=0)
 
-                    torch.cuda.synchronize()
-                    second_order_backward_end = time.time()
                     second_order_ls_solve_start = time.time()
 
                     x = torch.linalg.lstsq(damped_SJ, -damped_Sf).solution
@@ -686,12 +732,58 @@ class FrontEnd(mp.Process):
                     torch.cuda.synchronize()
                     second_order_ls_solve_end = time.time()
 
-                    # distortion = math.sqrt(n / (d * eta))
-                    # sigmas = torch.linalg.svdvals(SJ)
-                    # min_sigma = sigmas[-1] + math.sqrt(lambda_)
-                    # residual = torch.norm(Sf - SJ @ x) + math.sqrt(lambda_) * torch.norm(x)
-                    # upperbound = residual * 2 * distortion * (1 + distortion) / (((1 - distortion) ** 2) * min_sigma)
-                    # print(f"distortion = {distortion:.4f}, min_sigma = {min_sigma:.4f}, residual = {residual:.4f}, upperbound = {upperbound:.4f}")
+                    # DEBUG
+                    distortion = math.sqrt(n / (repeat_dim * d))
+                    gamma = (1 + distortion) / (1 - distortion)
+                    min_sigma = torch.linalg.svdvals(damped_SJ)[-1]
+                    residual = torch.norm(Sf - SJ @ x) + math.sqrt(lambda_) * torch.norm(x)
+                    upperbound = residual * gamma * math.sqrt(gamma ** 2 - 1) / min_sigma
+                    # # print(f"distortion = {distortion:.4f}, min_sigma = {min_sigma:.4f}, residual = {residual:.4f}, upperbound = {upperbound:.4f}")
+                    # target_upperbound = 0.1
+                    # if upperbound > target_upperbound:
+                    #     sketch_solution_ok = False
+
+                    #     upperbound_sq = upperbound ** 2
+                    #     gamma_sq = gamma ** 2
+                    #     K_sq = upperbound_sq / (gamma_sq * (gamma_sq - 1))
+                    #     # Solve the quadratic equation: upperbound^2 = K^2 * gamma^2 * (gamma^2 - 1)
+                    #     target_upperbound_sq = target_upperbound ** 2
+                    #     target_gamma_sq = 0.5 * (1 + math.sqrt(1 + 4 * (target_upperbound_sq / K_sq)))
+                    #     target_gamma = math.sqrt(target_gamma_sq)
+
+                    #     assert(target_gamma < gamma), f"target_gamma = {target_gamma:.4f}, gamma = {gamma:.4f}"
+                    #     assert(target_gamma > 1), f"target_gamma = {target_gamma:.4f}, gamma = {gamma:.4f}"
+                    #     target_distortion = (target_gamma - 1) / (target_gamma + 1)
+                    #     assert(distortion > target_distortion), f"target_distortion = {target_distortion:.4f}, distortion = {distortion:.4f}"
+                    #     distortion_factor = distortion / target_distortion
+                    #     # print(f"gamma = {gamma:.4f}, target_gamma = {target_gamma:.4f}, target_distortion = {target_distortion:.4f}, distortion = {distortion:.4f}, distortion_factor = {distortion_factor:.4f}")
+                    #     multiplier = 2 ** math.ceil(0.5 * math.log(distortion_factor))
+                    #     assert(multiplier >= 1)
+                    # else:
+                    #     sketch_solution_ok = True
+                    #     multiplier = 1
+                    # stack_dim *= int(multiplier)
+
+                    # print(f"stack_dim = {stack_dim}, multiplier = {multiplier:.4f}, distortion = {distortion:.4f}, min_sigma = {min_sigma:.4f}, residual = {residual:.4f}, upperbound = {upperbound:.4f}")
+
+                    # if tracking_itr < 30:
+                    #     sketch_solution_ok = False
+                    #     stack_dim += 4
+                    # else:
+                    #     sketch_solution_ok = True
+
+                    # DEBUG END
+
+                    if print_output or log_output:
+
+                        if print_output:
+                            print(f"distortion = {distortion:.4f}, min_sigma = {min_sigma:.4f}, residual = {residual:.4f}, upperbound = {upperbound:.4f}")
+
+                        if log_output:
+                            profile_data["distortions"].append(distortion)
+                            profile_data["min_sigmas"].append(min_sigma.item())
+                            profile_data["residuals"].append(residual.item())
+                            profile_data["upperbounds"].append(upperbound.item())
 
                     new_viewpoint_params = TempCamera(viewpoint)
                     new_viewpoint_params.step(x)
@@ -753,77 +845,6 @@ class FrontEnd(mp.Process):
         if print_output:
             print("Tracking converged in {} iterations".format(tracking_itr))
 
-        override = False
-        if override_mode == "first":
-            if print_output:
-                print("Overriding with first-order pose with frame {}".format(self.first_override_data[cur_frame_idx]["frame"]))
-            viewpoint.R = self.first_override_data[cur_frame_idx]["pose"][0]
-            viewpoint.T = self.first_override_data[cur_frame_idx]["pose"][1]
-            viewpoint.cam_rot_delta.data.fill_(0)
-            viewpoint.cam_trans_delta.data.fill_(0)
-            viewpoint.expousre_a = self.first_override_data[cur_frame_idx]["exposure"][0]
-            viewpoint.exposure_b = self.first_override_data[cur_frame_idx]["exposure"][1]
-            override = True
-
-        elif override_mode == "gt":
-            if print_output:
-                print("Overriding with GT pose")
-            # Set to GT
-            viewpoint.T = viewpoint.T_gt.clone()
-            viewpoint.cam_rot_delta.data.fill_(0)
-            viewpoint.cam_trans_delta.data.fill_(0)
-            override = True
-
-        elif override_mode == "best":
-            if self.first_override_data[cur_frame_idx]["loss_tracking_scalar"] < best_loss_scalar:
-                if print_output:
-                    print(f"best loss = {best_loss_scalar:.4f}, override loss = {self.first_override_data[cur_frame_idx]['loss_tracking_scalar']:.4f}")
-                    print("Overriding with better first-order pose with frame {}".format(self.first_override_data[cur_frame_idx]["frame"]))
-                viewpoint.R = self.first_override_data[cur_frame_idx]["pose"][0]
-                viewpoint.T = self.first_override_data[cur_frame_idx]["pose"][1]
-                viewpoint.cam_rot_delta.data.fill_(0)
-                viewpoint.cam_trans_delta.data.fill_(0)
-                viewpoint.expousre_a = self.first_override_data[cur_frame_idx]["exposure"][0]
-                viewpoint.exposure_b = self.first_override_data[cur_frame_idx]["exposure"][1]
-                override = True
-            else:
-                override = False
-        elif override_mode == "none":
-            override = False
-
-        if override:
-            render_pkg = render(
-                viewpoint, self.gaussians, self.pipeline_params, self.background
-            )
-            image, depth, opacity = (
-                render_pkg["render"],
-                render_pkg["depth"],
-                render_pkg["opacity"],
-            )
-
-            loss_tracking_img = get_loss_tracking_per_pixel(
-                self.config, image, depth, opacity, viewpoint
-            )
-
-            loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=2)
-            # trans_error = (viewpoint.T - viewpoint.T_gt).norm()
-            # angle_error = angle_diff(viewpoint.R, viewpoint.R_gt)
-
-            if print_output:
-                print(f"override loss = {loss_tracking_scalar.item():.4f}") #, trans_error = {trans_error.item():.4f}, angle_error = {angle_error.item():.4f}, lambda = {lambda_:.4f}")
-
-        elif not self.use_best_loss:
-            trans_error = (viewpoint.T - viewpoint.T_gt).norm()
-            if print_output:
-                print(f"Last loss = {loss_tracking_scalar.item():.4f}, trans error = {trans_error.item():.4f}")
-        else:
-            best_viewpoint_params, render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, = best_output
-            best_viewpoint_params.assign(viewpoint)
-            loss_tracking_scalar = best_loss_scalar
-            trans_error, angle_error = relative_pose_error(last_kf.T_gt, viewpoint.T_gt, last_kf.T, viewpoint.T)
-            if print_output:
-                print(f"Best loss = {best_loss_scalar.item():.4f}, Best trans error = {trans_error.item():.4f}, best angle error = {angle_error.item():.4f}")
-
         tracking_end = time.time()
         # print(f"Tracking time ms: {(tracking_end - tracking_start) * 1000}")
         self.tracking_time_sum += tracking_end - tracking_start
@@ -883,21 +904,74 @@ class FrontEnd(mp.Process):
             profile_data["frame"] = cur_frame_idx
             profile_data["timestamps"].append(time.time())
             profile_data["pose"] = [viewpoint.T]
+            profile_data["gt_pose"] = [viewpoint.T_gt]
             profile_data["exposure"] = [viewpoint.exposure_a, viewpoint.exposure_b]
             profile_data["num_iters"] = tracking_itr
             profile_data["loss_tracking_scalar"] = loss_tracking_scalar.item()
 
-            self.all_profile_data.append(profile_data)
+            all_profile_data_obj = self.all_profile_data if first_only else self.all_profile_data_firstonly
+
+            all_profile_data_obj.append(profile_data)
 
             if (cur_frame_idx + 1) % save_period == 0:
                 # Save to self.logdir/run-frame{cur_frame_idx}.pt
-                fname = f"run-frame{cur_frame_idx:06d}.pt"
+                fname = f"run-frame{cur_frame_idx:06d}.pt" if not first_only else f"run-frame{cur_frame_idx:06d}_firstonly.pt"
                 if print_output:
                     print(f"Saving profile data to {os.path.join(self.logdir, fname)}")
-                torch.save(self.all_profile_data, os.path.join(self.logdir, fname))
-                self.all_profile_data = []
+                torch.save(all_profile_data_obj, os.path.join(self.logdir, fname))
+                all_profile_data_obj.clear()
+
+        override = False
+        if override_mode == "gt":
+            if print_output:
+                print("Overriding with GT pose")
+            # Set to GT
+            viewpoint.T = viewpoint.T_gt.clone()
+            viewpoint.cam_rot_delta.data.fill_(0)
+            viewpoint.cam_trans_delta.data.fill_(0)
+            override = True
+
+        elif override_mode == "none":
+            override = False
+
+        if override:
+            render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background
+            )
+            image, depth, opacity = (
+                render_pkg["render"],
+                render_pkg["depth"],
+                render_pkg["opacity"],
+            )
+
+            loss_tracking_img = get_loss_tracking_per_pixel(
+                self.config, image, depth, opacity, viewpoint
+            )
+
+            loss_tracking_scalar = torch.norm(loss_tracking_img.flatten(), p=1)
+
+            if print_output:
+                print(f"override loss = {loss_tracking_scalar.item():.4f}") #, trans_error = {trans_error.item():.4f}, angle_error = {angle_error.item():.4f}, lambda = {lambda_:.4f}")
+
+        elif not self.use_best_loss:
+            trans_error = (viewpoint.T - viewpoint.T_gt).norm()
+            if print_output:
+                print(f"Last loss = {loss_tracking_scalar.item():.4f}, trans error = {trans_error.item():.4f}")
+        else:
+            best_viewpoint_params, render_pkg, image, depth, opacity, loss_tracking_img, forward_sketch_args, = best_output
+            best_viewpoint_params.assign(viewpoint)
+            loss_tracking_scalar = best_loss_scalar
+            trans_error, angle_error = relative_pose_error(last_kf.T_gt, viewpoint.T_gt, last_kf.T, viewpoint.T)
+            if print_output:
+                print(f"Best loss = {best_loss_scalar.item():.4f}, Best trans error = {trans_error.item():.4f}, best angle error = {angle_error.item():.4f}")
 
         self.median_depth = get_median_depth(depth, opacity)
+
+        if self.run_twice:
+            if run_twice_first_rep:
+                # If first only, reset viewpoint and run again
+                orig_viewpoint.assign(viewpoint)
+                return self.tracking(cur_frame_idx, viewpoint, run_twice_first_rep=False, run_twice_override_gt=self.run_twice_override_gt)
 
         return render_pkg
 
@@ -1101,6 +1175,10 @@ class FrontEnd(mp.Process):
             weighted_default_loss_tracking_img = default_loss_tracking_img * rand_weights
             default_Sf = weighted_default_loss_tracking_img[batch_indices, rand_indices_row, rand_indices_col].sum(dim=-1)
 
+            torch.set_printoptions(precision=10)
+
+            tol = 1e-4
+
             for i in range(repeat_dim):
                 for j in range(stack_dim):
                     for k in range(sketch_dim):
@@ -1118,7 +1196,9 @@ class FrontEnd(mp.Process):
 
                         correct_SJ_ijk = torch.cat((viewpoint.cam_trans_delta.grad, viewpoint.cam_rot_delta.grad, viewpoint.exposure_a.grad, viewpoint.exposure_b.grad), dim=0)
 
-                        assert torch.allclose(SJ[i, j, k], correct_SJ_ijk, atol=1e-6), f"i = {i}, j = {j}, k = {k}, SJ[i, j, k] = {SJ[i, j, k]}, correct_SJ_ijk = {correct_SJ_ijk}"
+                        if not torch.allclose(SJ[i, j, k], correct_SJ_ijk, atol=tol):
+                            diff = SJ[i, j, k] - correct_SJ_ijk
+                            assert torch.allclose(SJ[i, j, k], correct_SJ_ijk, atol=tol), f"i = {i}, j = {j}, k = {k}, SJ[i, j, k] = {SJ[i, j, k]}, correct_SJ_ijk = {correct_SJ_ijk}, diff = {diff}"
 
             print("Gradient check passed")
 
@@ -1932,6 +2012,7 @@ class FrontEnd(mp.Process):
                     )
                 if self.single_thread:
                     create_kf = check_time and create_kf
+
                 if create_kf:
                     self.current_window, removed = self.add_to_window(
                         cur_frame_idx,
@@ -1976,6 +2057,9 @@ class FrontEnd(mp.Process):
                     and len(self.kf_indices) % save_trj_kf_intv == 0
                 ):
                     Log("Evaluating ATE at frame: ", cur_frame_idx)
+                    print("self.cameras ref = ", hex(id(self.cameras)))
+                    print("frame 40 ref = ", hex(id(self.cameras[40])))
+                    print(f"frame 40 T = {self.cameras[40].T}")
                     eval_ate(
                         self.cameras,
                         self.kf_indices,

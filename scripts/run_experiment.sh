@@ -16,7 +16,7 @@ CONFIG="$PROJECT_DIR/configs/mono/tum/fr1_desk.yaml"
 num_iters=3
 
 #expname="f20s5d32l0.01"
-expname="fr1_desk_f30s5d1024l0.001huber0.01"
+expname="fr1_desk_f25s15d4x32l0.001huber0.01"
 for i in $(seq 1 $num_iters); do
     # Run the experiment
     python3 slam.py --config $CONFIG --eval 2>&1 | tee run.log

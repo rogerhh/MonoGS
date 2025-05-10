@@ -181,6 +181,9 @@ class ApplyExposure(torch.autograd.Function):
         torch.cuda.synchronize()
         apply_exposure_end = time.time()
 
+        # if ctx.sketch_mode != 0:
+        #     print(f"Apply exposure backward time ms: {1000 * (apply_exposure_end - apply_exposure_start)}")
+
         return grad_image, grad_exposure_a, grad_exposure_b, grad_exposure_eps, grad_sketch_mode, grad_sketch_dim, grad_stack_dim, grad_rand_indices, grad_sketch_dexposure
 
 

@@ -74,6 +74,8 @@ Training:
   
   # # First
   # RGN:
+  #   use_huber: True
+  #   huber_delta: 0.01
   #   pnorm: 1
   #   first_order:
   #     max_iter: 100
@@ -98,9 +100,9 @@ Training:
   #   override:
   #     mode: "none"  # "gt" or "first" or "none"
   #     first_logdir: "outputs/20250117-firstonly-loss-full"
-  #   use_best_loss: False
+  #   use_best_loss: True
   #   print_output: False
-  #   log_output: False
+  #   log_output: True
   #   log_basedir: "outputs"
   #   save_period: 10
 
@@ -248,15 +250,16 @@ Training:
     huber_delta: 0.01
     pnorm: 1
     first_order:
-      max_iter: 40
+      max_iter: 20
       fast_iter: 0
       num_backward_gaussians: -1
       num_pixels: -1
     second_order:
-      max_iter: 10
+      max_iter: 5
+      # IT SEEMS LIKE INCREASING STACK DIM AS IT GOES IS BUGGED
       num_backward_gaussians: -1
       repeat_dim: 1
-      stack_dim: 16
+      stack_dim: 2
       sketch_dim: 64
       initial_lambda: 0.001
       max_lambda: 10000000
@@ -268,13 +271,18 @@ Training:
       use_nonmonotonic_step: False
       use_first_order_best: True
     override:
-      mode: "none"  # "gt" or "first" or "none" or "best"
+      mode: "gt"  # "gt" or "first" or "none" or "best"
       first_logdir: "outputs/20250126_1717-firstonly-loss-full"
     use_best_loss: True
     print_output: False
-    log_output: False
+    log_output: True
     log_basedir: "outputs"
     save_period: 10
+
+    experimental:
+      run_twice: True
+      run_twice_first_only: True
+      run_twice_override_gt: True
 
   experiment_step: -1
 
