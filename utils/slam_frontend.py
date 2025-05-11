@@ -157,7 +157,7 @@ class FrontEnd(mp.Process):
         chunk_size = m // d
 
         # These are static tensors so can initialize them here
-        self.sketch_index_offsets = (torch.arange(self.stack_dim, dtype=torch.int32, device=self.device) * (chunk_size*d)).repeat_interleave(chunk_size*d // self.stack_dim)
+        self.sketch_index_offsets = (torch.arange(self.stack_dim, dtype=torch.int32, device=self.device) * (m)).repeat_interleave(chunk_size*d // self.stack_dim)
         self.sketch_index_vals = torch.arange(self.sketch_dim, dtype=torch.int32, device=self.device).repeat_interleave(chunk_size).repeat(self.stack_dim)
         self.sketch_index_indices = torch.arange(chunk_size*d, dtype=torch.int32, device=self.device)
 
